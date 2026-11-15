@@ -70,15 +70,21 @@ export function toolSpecs(deputy, session) {
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       outputSchema: {
         type: 'object',
-        additionalProperties: false,
+        additionalProperties: true,
         properties: {
-          score: { type: 'number', required: true },
-          tier: { type: 'string', required: true },
+          first: { type: 'boolean' },
+          skipped: { type: 'string' },
+          score: { type: 'number' },
+          tier: { type: 'string' },
           hashDistance: { type: 'number' },
           box: { type: 'object' },
         },
       },
-      render: (_args, v) => text(`变化 ${Number(v?.score ?? 0).toFixed(3)} · ${v?.tier ?? 'unknown'}`),
+      render: (_args, v) => {
+        if (v?.first) return text('已建立首帧基线')
+        if (v?.skipped) return text(`本次未出图（${v.skipped}）`)
+        return text(`变化 ${Number(v?.score ?? 0).toFixed(3)} · ${v?.tier ?? 'unknown'}`)
+      },
       handler: async () => deputy.observe(),
     },
     {
@@ -87,7 +93,7 @@ export function toolSpecs(deputy, session) {
       inputSchema: {
         type: 'object',
         properties: {
-          kind: { enum: ['uia', 'input', 'shell', 'wait'] },
+          kind: { type: 'string', enum: ['uia', 'input', 'shell', 'wait'] },
           payload: { type: 'object' },
           expect: { type: 'number', description: 'ROI 内期望的最小变化量' },
         },
@@ -115,16 +121,25 @@ export function toolSpecs(deputy, session) {
       },
       outputSchema: {
         type: 'object',
-        additionalProperties: false,
+        additionalProperties: true,
         properties: {
           frames: { type: 'number', required: true },
-          budget: { type: 'string' },
+          budget: { type: 'object' },
+          deduped: { type: 'boolean' },
+          dropped: { type: 'string' },
         },
       },
-      render: (_args, v) => text(v?.frames ? `推送 ${v.frames} 帧联系表（预算 ${v.budget ?? 'n/a'}）` : '没有值得推的帧'),
+      render: (_args, v) => {
+        if (v?.dropped) return text(`拼图未推送（${v.dropped}）`)
+        if (!v?.frames) return text('没有值得推的帧')
+        const level = v.budget?.degradation?.level ?? 'normal'
+        return text(`推送 ${v.frames} 帧联系表（预算 ${level}${v.deduped ? '，内容重复未重复上屏' : ''}）`)
+      },
       handler: async (args) => {
         const ev = await deputy.flush(args.reason)
-        return ev ? { frames: ev.frames.length, budget: ev.budget } : { frames: 0 }
+        if (!ev) return { frames: 0 }
+        if (ev.dropped) return { frames: 0, dropped: ev.dropped }
+        return { frames: ev.frames.length, budget: ev.budget, deduped: ev.deduped }
       },
     },
     {
@@ -133,7 +148,7 @@ export function toolSpecs(deputy, session) {
       inputSchema: {
         type: 'object',
         properties: {
-          op: { enum: ['status', 'open', 'launch', 'tree', 'close'] },
+          op: { type: 'string', enum: ['status', 'open', 'launch', 'tree', 'close'] },
           exe: { type: 'string', description: 'launch 时要启动的可执行文件' },
           args: { type: 'array', items: { type: 'string' } },
           depth: { type: 'number', description: 'tree 的递归深度' },
@@ -248,9 +263,14 @@ export function apply(ctx = {}) {
   }
 
   if (typeof ctx.onDispose === 'function') {
-    ctx.onDispose(() => {
-      state.viewer?.stop?.().catch?.(() => {})
-      return session.close().catch(() => {})
+    ctx.onDispose(async () => {
+      try {
+        await state.viewer?.stop?.()
+      } catch {
+        /* 端点回收失败也要继续关桌面 */
+      }
+      state.viewer = null
+      await session.close().catch(() => {})
     })
   }
 

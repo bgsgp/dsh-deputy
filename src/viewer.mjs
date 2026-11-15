@@ -1,8 +1,5 @@
 // 桌面面板的数据面：一个只绑 127.0.0.1 的极简 HTTP 端点。
 //
-// 为什么不用宿主路由：DSH 的 host 路由 API 各版本不一致，而面板只服务本机浏览器，
-// 自己起一个 node:http 服务最稳，也不依赖 api-gateway。
-//
 // 路由（全部 JSON，全部 cache-control: no-store）：
 //   GET  /api/health          → { ok, platform, state, name, pid }
 //   GET  /api/frame           → { ok, png(base64 灰度 PNG), width, height, ts }
@@ -11,15 +8,24 @@
 //   POST /api/launch { exe }  → 在隔离桌面里起程序
 //   POST /api/input  { type: 'click', x, y }  x/y 为 0..1 归一化坐标
 //                    { type: 'type', text }
-// 点击会被换算成像素坐标再交给宿主（宿主协议就是像素，见 windows-desktop.ps1）。
+// input 同时兼容 op 字段；点击会被换算成像素坐标再交给宿主。
 import http from 'node:http'
 import { encodeGrayPng } from './png.mjs'
 
 export const DEFAULT_VIEW_PORT = 17872
+const MAX_BODY_BYTES = 1_000_000
+
+function badRequest(message, statusCode = 400) {
+  const err = new Error(message)
+  err.statusCode = statusCode
+  return err
+}
 
 export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.0.1' } = {}) {
+  if (!session) throw new TypeError('createViewer 需要 session')
   let server = null
   let lastFrame = null
+  let frameInFlight = null
 
   const cors = {
     'access-control-allow-origin': '*',
@@ -28,27 +34,84 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
     'cache-control': 'no-store',
   }
 
-  function json(res, status, body) {
-    res.writeHead(status, { ...cors, 'content-type': 'application/json; charset=utf-8' })
+  function json(res, status, body, headers = {}) {
+    if (res.writableEnded) return
+    res.writeHead(status, { ...cors, ...headers, 'content-type': 'application/json; charset=utf-8' })
     res.end(JSON.stringify(body))
   }
 
   function readBody(req) {
     return new Promise((resolve, reject) => {
       let raw = ''
+      let size = 0
+      let settled = false
+      const fail = (err) => {
+        if (settled) return
+        settled = true
+        raw = ''
+        reject(err)
+      }
       req.on('data', (chunk) => {
+        if (settled) return
+        size += chunk.length
+        if (size > MAX_BODY_BYTES) {
+          fail(badRequest(`请求体超过 ${MAX_BODY_BYTES} 字节`, 413))
+          return
+        }
         raw += chunk
-        if (raw.length > 1_000_000) reject(new Error('body too large'))
       })
       req.on('end', () => {
+        if (settled) return
+        settled = true
+        if (!raw) return resolve({})
         try {
-          resolve(raw ? JSON.parse(raw) : {})
+          const value = JSON.parse(raw)
+          if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return reject(badRequest('JSON 请求体必须是对象'))
+          }
+          resolve(value)
         } catch (e) {
-          reject(new Error(`JSON 解析失败: ${e.message}`))
+          reject(badRequest(`JSON 解析失败: ${e.message}`))
         }
       })
-      req.on('error', reject)
+      req.on('error', fail)
     })
+  }
+
+  async function bodyOf(req) {
+    try {
+      return await readBody(req)
+    } catch (e) {
+      throw e.statusCode ? e : badRequest(e.message)
+    }
+  }
+
+  async function captureFrame() {
+    // 轮询、手动刷新、点击后补帧可能同时到来；合并成一次 BitBlt，避免把宿主打满。
+    if (frameInFlight) return frameInFlight
+    frameInFlight = (async () => {
+      const f = await session.capture()
+      if (!Number.isInteger(f.width) || !Number.isInteger(f.height) || f.width <= 0 || f.height <= 0) {
+        throw new Error('宿主返回了非法帧尺寸')
+      }
+      return {
+        png: encodeGrayPng(f.gray, f.width, f.height).toString('base64'),
+        width: f.width,
+        height: f.height,
+        ts: Date.now(),
+      }
+    })()
+    try {
+      const frame = await frameInFlight
+      lastFrame = frame
+      return frame
+    } finally {
+      frameInFlight = null
+    }
+  }
+
+  function methodNotAllowed(res, allow) {
+    return json(res, 405, { ok: false, reason: '方法不允许' }, { allow })
   }
 
   async function handle(req, res) {
@@ -60,6 +123,7 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
     }
 
     if (url.pathname === '/api/health') {
+      if (req.method !== 'GET') return methodNotAllowed(res, 'GET')
       return json(res, 200, {
         ok: true,
         platform: process.platform,
@@ -70,6 +134,7 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
     }
 
     if (url.pathname === '/api/frame') {
+      if (req.method !== 'GET') return methodNotAllowed(res, 'GET')
       if (session.state !== 'opened' && session.state !== 'running') {
         return json(res, 200, {
           ok: false,
@@ -78,20 +143,15 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
         })
       }
       try {
-        const f = await session.capture()
-        lastFrame = {
-          png: encodeGrayPng(f.gray, f.width, f.height).toString('base64'),
-          width: f.width,
-          height: f.height,
-          ts: Date.now(),
-        }
-        return json(res, 200, { ok: true, ...lastFrame })
+        const frame = await captureFrame()
+        return json(res, 200, { ok: true, ...frame })
       } catch (e) {
         return json(res, 200, { ok: false, state: session.state, reason: e.message })
       }
     }
 
-    if (url.pathname === '/api/open' && req.method === 'POST') {
+    if (url.pathname === '/api/open') {
+      if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
       try {
         await session.ensureOpen()
         return json(res, 200, { ok: true, state: session.state, name: session.name })
@@ -100,7 +160,8 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
       }
     }
 
-    if (url.pathname === '/api/close' && req.method === 'POST') {
+    if (url.pathname === '/api/close') {
+      if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
       try {
         const r = await session.close()
         lastFrame = null
@@ -110,40 +171,55 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
       }
     }
 
-    if (url.pathname === '/api/launch' && req.method === 'POST') {
-      const b = await readBody(req)
+    if (url.pathname === '/api/launch') {
+      if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
       try {
+        const b = await bodyOf(req)
+        if (typeof b.exe !== 'string' || !b.exe.trim()) throw badRequest('launch 需要非空 exe')
+        const args = b.args ?? []
+        if (!Array.isArray(args) || args.some((v) => typeof v !== 'string')) {
+          throw badRequest('args 必须是字符串数组')
+        }
         await session.ensureOpen()
-        const r = await session.startApp(String(b.exe), b.args ?? [])
+        const r = await session.startApp(b.exe.trim(), args)
         return json(res, 200, { ok: true, ...r })
       } catch (e) {
-        return json(res, 200, { ok: false, reason: e.message })
+        return json(res, e.statusCode ?? 200, { ok: false, reason: e.message })
       }
     }
 
-    if (url.pathname === '/api/input' && req.method === 'POST') {
-      const b = await readBody(req)
-      const width = lastFrame?.width ?? session.captureWidth ?? 0
-      const height = lastFrame?.height ?? session.captureHeight ?? 0
-      let input
-      if (b.type === 'click') {
-        // 归一化 → 像素：面板怎么缩放都不影响命中点
-        input = {
-          op: 'click',
-          x: Math.round(Number(b.x ?? 0.5) * width),
-          y: Math.round(Number(b.y ?? 0.5) * height),
-          button: b.button === 'right' ? 'right' : 'left',
-        }
-      } else if (b.type === 'type') {
-        input = { op: 'type', text: String(b.text ?? '') }
-      } else {
-        return json(res, 400, { ok: false, reason: `未知 type ${b.type}` })
-      }
+    if (url.pathname === '/api/input') {
+      if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
       try {
+        const b = await bodyOf(req)
+        const kind = b.type ?? b.op // 旧客户端曾使用 op，两种都接受
+        const width = lastFrame?.width ?? session.captureWidth ?? 0
+        const height = lastFrame?.height ?? session.captureHeight ?? 0
+        let input
+        if (kind === 'click') {
+          const x = Number(b.x)
+          const y = Number(b.y)
+          if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) {
+            throw badRequest('click 的 x/y 必须是 0..1 的有限数值')
+          }
+          if (!(width > 0 && height > 0)) throw badRequest('还没有可用于坐标换算的帧尺寸', 409)
+          input = {
+            op: 'click',
+            x: Math.min(width - 1, Math.round(x * width)),
+            y: Math.min(height - 1, Math.round(y * height)),
+            button: b.button === 'right' ? 'right' : 'left',
+          }
+        } else if (kind === 'type') {
+          if (typeof b.text !== 'string') throw badRequest('type 需要字符串 text')
+          if (b.text.length > 100_000) throw badRequest('text 过长', 413)
+          input = { op: 'type', text: b.text }
+        } else {
+          throw badRequest(`未知输入类型 ${String(kind)}`)
+        }
         await session.input(input)
         return json(res, 200, { ok: true, input, width, height })
       } catch (e) {
-        return json(res, 200, { ok: false, reason: e.message })
+        return json(res, e.statusCode ?? 200, { ok: false, reason: e.message })
       }
     }
 
@@ -154,27 +230,40 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
     port,
     url: `http://${host}:${port}/`,
     async start() {
-      if (server) return this.url
+      if (server?.listening) return this.url
       server = http.createServer((req, res) => {
         handle(req, res).catch((e) => {
           try {
-            json(res, 500, { ok: false, reason: e.message })
+            json(res, e.statusCode ?? 500, { ok: false, reason: e.message })
           } catch {
             res.destroy()
           }
         })
       })
-      await new Promise((resolve, reject) => {
-        server.once('error', reject)
-        server.listen(port, host, resolve)
-      })
+      try {
+        await new Promise((resolve, reject) => {
+          server.once('error', reject)
+          server.listen(port, host, resolve)
+        })
+      } catch (e) {
+        const failed = server
+        server = null
+        failed?.close()
+        throw e
+      }
+      this.port = server.address().port // port=0 时返回系统分配的空闲端口，便于测试与并行实例
+      this.url = `http://${host}:${this.port}/`
       return this.url
     },
     async stop() {
       if (!server) return
       const s = server
       server = null
-      await new Promise((resolve) => s.close(resolve))
+      frameInFlight = null
+      lastFrame = null
+      const closed = new Promise((resolve) => s.close(resolve))
+      s.closeAllConnections?.() // 不让 keep-alive 连接卡住插件卸载
+      await closed
     },
   }
 }

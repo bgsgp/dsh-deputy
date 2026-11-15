@@ -40,6 +40,7 @@ window.__ModuleLoader__.load({
 .ddn-btn{padding:3px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;cursor:pointer;
   background:var(--dsw-alias-bg-layer-2);color:inherit;font:inherit}
 .ddn-btn:hover{border-color:var(--dsw-alias-brand-primary)}
+.ddn-btn:disabled{opacity:.5;cursor:wait}
 .ddn-stage{flex:1;position:relative;display:flex;align-items:center;justify-content:center;
   overflow:hidden;background:var(--dsw-alias-bg-layer-2)}
 .ddn-img{max-width:100%;max-height:100%;image-rendering:pixelated;cursor:crosshair}
@@ -72,13 +73,20 @@ window.__ModuleLoader__.load({
       const [frame, setFrame] = useState(null)
       const [health, setHealth] = useState(null)
       const [err, setErr] = useState(null)
+      const [opening, setOpening] = useState(false)
       const [pos, setPos] = useState(null)
       const imgRef = useRef(null)
       const dragRef = useRef(null)
+      const mountedRef = useRef(true)
+      const pullingRef = useRef(false)
+      const beatingRef = useRef(false)
 
       const pull = useCallback(async () => {
+        if (pullingRef.current) return
+        pullingRef.current = true
         try {
           const f = await api('/api/frame')
+          if (!mountedRef.current) return
           if (f.ok) {
             setFrame(f)
             setErr(null)
@@ -87,38 +95,51 @@ window.__ModuleLoader__.load({
             setErr(f.reason)
           }
         } catch (e) {
-          setErr(String(e.message || e))
+          if (mountedRef.current) {
+            setFrame(null) // 连接断开时不保留可点击的旧画面
+            setErr(String(e.message || e))
+          }
+        } finally {
+          pullingRef.current = false
         }
       }, [])
 
       const beat = useCallback(async () => {
+        if (beatingRef.current) return
+        beatingRef.current = true
         try {
           const s = await api('/api/health')
-          setHealth(s)
+          if (!mountedRef.current) return
+          setHealth((prev) =>
+            prev && prev.platform === s.platform && prev.state === s.state && prev.name === s.name && prev.pid === s.pid
+              ? prev
+              : s,
+          )
           if (onState) onState(s.state)
         } catch (e) {
-          setHealth(null)
+          if (mountedRef.current) setHealth(null)
+        } finally {
+          beatingRef.current = false
         }
       }, [onState])
 
       useEffect(() => {
-        let alive = true
-        const safePull = () => alive && pull()
-        const safeBeat = () => alive && beat()
-        safeBeat()
-        safePull()
-        // 700ms 一帧足够"手动点选"，也不至于把宿主 BitBlt 打满
-        const t1 = setInterval(safePull, 700)
-        const t2 = setInterval(safeBeat, 2500)
+        mountedRef.current = true
+        beat()
+        pull()
+        // 700ms 一帧足够"手动点选"；请求未完成时下一轮直接跳过，不叠加。
+        const t1 = setInterval(pull, 700)
+        const t2 = setInterval(beat, 2500)
         return () => {
-          alive = false
+          mountedRef.current = false
           clearInterval(t1)
           clearInterval(t2)
         }
       }, [pull, beat])
 
-      // 拖窗：只认标题栏，避免拖动时吞掉画面里的点击
+      // 拖窗：只认标题栏空白区，按钮点击不触发拖动。
       const onHeadDown = (e) => {
+        if (e.button !== 0 || e.target.closest('button')) return
         const el = e.currentTarget.parentElement
         const rect = el.getBoundingClientRect()
         dragRef.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top }
@@ -164,21 +185,31 @@ window.__ModuleLoader__.load({
       }
 
       const open = async () => {
+        if (opening) return
+        setOpening(true)
         try {
           const r = await api('/api/open', { method: 'POST' })
+          if (!mountedRef.current) return
           if (!r.ok) setErr(r.reason)
+          else setErr(null)
+          await beat()
           setTimeout(pull, 600)
         } catch (e) {
-          setErr(String(e.message || e))
+          if (mountedRef.current) setErr(String(e.message || e))
+        } finally {
+          if (mountedRef.current) setOpening(false)
         }
       }
 
       const close = async () => {
         try {
           await api('/api/close', { method: 'POST' })
+          if (!mountedRef.current) return
           setFrame(null)
+          setErr(null)
+          await beat()
         } catch (e) {
-          setErr(String(e.message || e))
+          if (mountedRef.current) setErr(String(e.message || e))
         }
       }
 
@@ -196,10 +227,10 @@ window.__ModuleLoader__.load({
           h('span', { className: 'ddn-title' }, '虚拟桌面'),
           h('span', { className: 'ddn-tag' }, state),
           h('span', { className: 'ddn-spacer' }),
-          h('button', { className: 'ddn-btn', onClick: open, title: '开隔离桌面（Windows 上会弹 UAC）' }, '打开'),
-          h('button', { className: 'ddn-btn', onClick: close }, '收起'),
-          h('button', { className: 'ddn-btn', onClick: pull }, '刷新'),
-          h('button', { className: 'ddn-btn', onClick: onClose }, '×'),
+          h('button', { className: 'ddn-btn', type: 'button', onClick: open, disabled: opening, title: '开隔离桌面（Windows 上会弹 UAC）' }, opening ? '打开中' : '打开'),
+          h('button', { className: 'ddn-btn', type: 'button', onClick: close }, '收起'),
+          h('button', { className: 'ddn-btn', type: 'button', onClick: pull }, '刷新'),
+          h('button', { className: 'ddn-btn', type: 'button', onClick: onClose, 'aria-label': '关闭面板' }, '×'),
         ),
         h(
           'div',
@@ -239,6 +270,7 @@ window.__ModuleLoader__.load({
     function Toggle() {
       const [isOpen, setIsOpen] = useState(false)
       const [live, setLive] = useState(false)
+      const onState = useCallback((s) => setLive(s === 'opened' || s === 'running'), [])
       return h(
         React.Fragment,
         null,
@@ -251,7 +283,7 @@ window.__ModuleLoader__.load({
         isOpen
           ? h(ViewerWindow, {
               onClose: () => setIsOpen(false),
-              onState: (s) => setLive(s === 'opened' || s === 'running'),
+              onState,
             })
           : null,
       )

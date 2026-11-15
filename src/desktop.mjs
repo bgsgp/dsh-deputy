@@ -1,16 +1,7 @@
 // DESKTOP 层：一个真正活着的虚拟桌面会话
 //
-// 关键点：Windows 的桌面对象是"引用计数"的——创建它的进程一退出，桌面就没了。
-// 所以不能"建一下、记个 handle、下次再用"，必须有一个**常驻宿主进程**攒着这个桌面，
-// 由它承接后续的启动进程 / 采帧 / 取树 / 键鼠。这里就是那个宿主的客户端封装。
-//
+// Windows 桌面对象由常驻宿主持有；这里负责它的进程协议与生命周期。
 // 生命周期： idle → opened → running → closed
-//   open()   ：创建独立 Desktop（需要管理员，GENERIC_ALL）
-//   start()  ：在隔离桌面里 CreateProcess，目标程序的窗口只存在于该桌面
-//   capture()：宿主线程 SetThreadDesktop 后 BitBlt 取帧（非活动桌面不能用 WGC）
-//   tree()   ：宿主线程在该桌面上取 UIA 树（RootElement 指向线程所在桌面）
-//   input()  ：宿主线程在该桌面上 SendInput
-//   close()  ：宿主退出 → 桌面对象销毁，目标进程随之结束
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,28 +17,32 @@ export class DesktopError extends Error {
   }
 }
 
-/**
- * 常驻宿主：一行 JSON 一条命令，一行 JSON 一条回执。
- * 生产环境建议换成编译好的 worker exe（PowerShell 自身的隐藏窗口会污染 UIA 树，
- * 这点在 scripts/windows-desktop.ps1 的注释里也写明了）。
- */
+/** 常驻宿主：一行 JSON 一条命令，一行 JSON 一条回执。 */
 export function createHostTransport({ script = path.join(SCRIPTS, 'windows-desktop.ps1'), timeoutMs = 12000 } = {}) {
   let child = null
   let seq = 0
   const waiting = new Map()
 
+  function rejectAll(err) {
+    for (const p of waiting.values()) p.reject(err)
+    waiting.clear()
+  }
+
   function start(name) {
     if (process.platform !== 'win32') {
       return Promise.reject(new DesktopError('虚拟桌面宿主仅在 win32 可用', 'ENOPLATFORM'))
     }
-    child = spawn(
+    if (child) return Promise.reject(new DesktopError('宿主已经启动', 'EHOSTRUNNING'))
+
+    const proc = spawn(
       'powershell.exe',
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Op', 'host', '-Name', name],
       { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
     )
-    child.stdout.setEncoding('utf8')
+    child = proc
+    proc.stdout.setEncoding('utf8')
     let buf = ''
-    child.stdout.on('data', (chunk) => {
+    proc.stdout.on('data', (chunk) => {
       buf += chunk
       const lines = buf.split('\n')
       buf = lines.pop() ?? ''
@@ -61,20 +56,25 @@ export function createHostTransport({ script = path.join(SCRIPTS, 'windows-deskt
             msg.ok ? p.resolve(msg) : p.reject(new DesktopError(msg.error ?? 'host error', msg.code))
           }
         } catch {
-          /* 非协议输出（PS 警告）忽略 */
+          /* PowerShell 的非协议输出忽略 */
         }
       }
     })
-    child.on('exit', (code) => {
-      for (const p of waiting.values()) p.reject(new DesktopError(`宿主退出 ${code}`, 'EHOSTEXIT'))
-      waiting.clear()
-      child = null
+    // 必须监听 error：可执行文件缺失时，未监听的 spawn error 会让整个 Node 进程退出。
+    proc.on('error', (err) => {
+      rejectAll(new DesktopError(`宿主启动失败: ${err.message}`, 'ESPAWN'))
+      if (child === proc) child = null
+    })
+    proc.on('exit', (code) => {
+      rejectAll(new DesktopError(`宿主退出 ${code}`, 'EHOSTEXIT'))
+      if (child === proc) child = null
     })
     return request({ op: 'create', name })
   }
 
   function request(payload) {
-    if (!child) return Promise.reject(new DesktopError('宿主未启动', 'ENOHOST'))
+    const proc = child
+    if (!proc) return Promise.reject(new DesktopError('宿主未启动', 'ENOHOST'))
     const id = ++seq
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -91,30 +91,45 @@ export function createHostTransport({ script = path.join(SCRIPTS, 'windows-deskt
           reject(e)
         },
       })
-      child.stdin.write(JSON.stringify({ ...payload, id }) + '\n')
+      try {
+        proc.stdin.write(JSON.stringify({ ...payload, id }) + '\n', (err) => {
+          if (!err) return
+          const p = waiting.get(id)
+          waiting.delete(id)
+          p?.reject(new DesktopError(`写入宿主失败: ${err.message}`, 'EWRITE'))
+        })
+      } catch (err) {
+        const p = waiting.get(id)
+        waiting.delete(id)
+        p?.reject(new DesktopError(`写入宿主失败: ${err.message}`, 'EWRITE'))
+      }
     })
   }
 
   function stop() {
-    if (!child) return
-    try {
-      child.stdin.end()
-      child.kill()
-    } catch {
-      /* ignore */
-    }
+    const proc = child
+    if (!proc) return
     child = null
+    rejectAll(new DesktopError('宿主已停止', 'ECLOSED'))
+    try {
+      proc.stdin.end()
+      proc.kill()
+    } catch {
+      /* 已退出 */
+    }
   }
 
   return { start, request, stop }
 }
 
-/** 内存假宿主：非 Windows 也能测状态机与降级逻辑 */
+/** 内存假宿主：非 Windows 也能测状态机与 HTTP 数据面。 */
 export function createFakeTransport() {
-  const state = { desktop: null, pid: null, frames: 0, inputs: 0, closed: false }
+  const state = { desktop: null, pid: null, frames: 0, inputs: 0, closed: false, starts: 0 }
   return {
     state,
     start: async (name) => {
+      state.starts++
+      state.closed = false
       state.desktop = name
       return { ok: true, desktop: name }
     },
@@ -122,8 +137,8 @@ export function createFakeTransport() {
       if (state.closed) throw new DesktopError('会话已关闭', 'ECLOSED')
       switch (payload.op) {
         case 'launch':
-          state.pid = 4321
-          return { ok: true, pid: 4321 }
+          state.pid = (state.pid ?? 4320) + 1
+          return { ok: true, pid: state.pid }
         case 'capture': {
           state.frames++
           const w = 32
@@ -155,79 +170,124 @@ export class DesktopSession {
     this.lastError = null
     this.captureWidth = captureWidth
     this.captureHeight = captureHeight
+    this._opening = null
+    this._closing = null
   }
 
-  async open() {
-    if (this.state !== 'idle') throw new DesktopError(`open 只能在 idle 时调用，当前 ${this.state}`, 'ESTATE')
-    try {
-      await this.transport.start(this.name)
-      this.state = 'opened'
-      return this
-    } catch (err) {
-      this.lastError = err
-      throw err
+  assertActive(action = '操作') {
+    if (this.state === 'closed') throw new DesktopError('会话已关闭', 'ECLOSED')
+    if (this.state !== 'opened' && this.state !== 'running') {
+      throw new DesktopError(`${action} 需要已打开的桌面，当前 ${this.state}`, 'ESTATE')
     }
   }
 
-  /** 在隔离桌面里启动目标程序；它之后的所有窗口都不会出现在用户主桌面 */
+  async open() {
+    if (this._opening) return this._opening
+    if (this.state !== 'idle') throw new DesktopError(`open 只能在 idle 时调用，当前 ${this.state}`, 'ESTATE')
+    const opening = (async () => {
+      try {
+        await this.transport.start(this.name)
+        this.state = 'opened'
+        this.lastError = null
+        return this
+      } catch (err) {
+        this.lastError = err
+        this.transport.stop()
+        throw err
+      }
+    })()
+    this._opening = opening
+    try {
+      return await opening
+    } finally {
+      if (this._opening === opening) this._opening = null
+    }
+  }
+
+  /** 在隔离桌面里启动程序；running 时也允许再开其它程序。 */
   async startApp(exe, args = []) {
-    if (this.state !== 'opened') throw new DesktopError(`startApp 需要 opened，当前 ${this.state}`, 'ESTATE')
-    const r = await this.transport.request({ op: 'launch', exe, args: args.join(' '), desktop: this.name })
-    this.pid = r.pid ?? null
+    this.assertActive('startApp')
+    if (typeof exe !== 'string' || !exe.trim()) throw new DesktopError('startApp 需要非空 exe', 'EARGS')
+    if (!Array.isArray(args) || args.some((v) => typeof v !== 'string')) {
+      throw new DesktopError('args 必须是字符串数组', 'EARGS')
+    }
+    const r = await this.transport.request({ op: 'launch', exe: exe.trim(), args: args.join(' '), desktop: this.name })
+    this.pid = r.pid ?? this.pid
     this.state = 'running'
     return r
   }
 
   async capture(region) {
-    if (this.state === 'idle') throw new DesktopError('会话未打开', 'ESTATE')
+    this.assertActive('capture')
     const r = await this.transport.request({ op: 'capture', desktop: this.name, region: region ?? null })
-    // 宿主回传 8bit 灰度 base64，直接喂给 diff.mjs，不用再转 RGBA
-    return {
-      gray: Uint8Array.from(Buffer.from(r.grayBase64, 'base64')),
-      width: r.width ?? this.captureWidth,
-      height: r.height ?? this.captureHeight,
+    const width = r.width ?? this.captureWidth
+    const height = r.height ?? this.captureHeight
+    if (typeof r.grayBase64 !== 'string' || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+      throw new DesktopError('宿主返回了非法帧数据', 'EFRAME')
     }
+    const gray = Uint8Array.from(Buffer.from(r.grayBase64, 'base64'))
+    if (gray.length !== width * height) {
+      throw new DesktopError(`帧字节数不匹配：${gray.length} != ${width * height}`, 'EFRAME')
+    }
+    return { gray, width, height }
   }
 
   async tree(depth = 4) {
-    if (this.state === 'idle') throw new DesktopError('会话未打开', 'ESTATE')
+    this.assertActive('tree')
     return this.transport.request({ op: 'tree', desktop: this.name, depth })
   }
 
   async input(input) {
-    if (this.state === 'idle') throw new DesktopError('会话未打开', 'ESTATE')
+    this.assertActive('input')
     return this.transport.request({ op: 'input', input, desktop: this.name })
   }
 
-  /** 幂等关闭：宿主退出即桌面销毁，不残留 */
+  /** 幂等关闭；并发 close 共享同一个 Promise，不重复终止宿主。 */
   async close() {
-    if (this.state === 'closed' || this.state === 'idle') {
-      this.state = 'closed'
-      return { ok: true, already: true }
-    }
+    if (this._closing) return this._closing
+    const closing = (async () => {
+      if (this._opening) {
+        try {
+          await this._opening
+        } catch {
+          /* 打开失败后仍按关闭流程回收 */
+        }
+      }
+      if (this.state === 'closed' || this.state === 'idle') {
+        this.transport.stop()
+        this.state = 'closed'
+        this.pid = null
+        return { ok: true, already: true }
+      }
+      try {
+        await this.transport.request({ op: 'close' })
+      } finally {
+        this.transport.stop()
+        this.state = 'closed'
+        this.pid = null
+      }
+      return { ok: true }
+    })()
+    this._closing = closing
     try {
-      await this.transport.request({ op: 'close' })
+      return await closing
     } finally {
-      this.transport.stop()
-      this.state = 'closed'
+      if (this._closing === closing) this._closing = null
     }
-    return { ok: true }
   }
 
-  /** 权限不足时的显式降级：不偷偷在主桌面乱点，而是报错让人决定 */
+  /** 权限不足时显式报错；并发 ensureOpen 只创建一个桌面。 */
   async ensureOpen() {
     if (this.state === 'opened' || this.state === 'running') return this
-    await this.open()
-    return this
+    if (this.state === 'closed') throw new DesktopError('会话已关闭，不能重新打开同一会话', 'ECLOSED')
+    return this.open()
   }
 }
 
-/** 把会话包成 runner 的 sensor（采帧永远走隔离桌面） */
 export function sessionSensor(session) {
   return { capture: () => session.capture() }
 }
 
-/** 把会话包成 runner 的 actuator（动作永远发在隔离桌面里） */
 export function sessionActuator(session) {
   return {
     async perform(a) {
@@ -235,7 +295,7 @@ export function sessionActuator(session) {
         case 'input':
           return session.input(a.payload)
         case 'uia':
-          // UIA pattern 需要宿主侧在同一桌面解析 ref，这里透传给宿主
+          session.assertActive('uia')
           return session.transport.request({ op: 'uia', desktop: session.name, payload: a.payload })
         case 'shell':
           return session.startApp(a.payload.file, a.payload.args ?? [])
