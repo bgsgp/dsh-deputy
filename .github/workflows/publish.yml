@@ -31,7 +31,7 @@ jobs:
       - name: 校验 OIDC 可用
         run: |
           test -n "$ACTIONS_ID_TOKEN_REQUEST_URL" || { echo "缺少 id-token 权限或不在 Actions 环境，无法可信发布"; exit 1; }
-          echo "OIDC 端点就绩"
+          echo "OIDC 端点就绪"
 
       - name: 自检
         run: |
@@ -40,5 +40,5 @@ jobs:
           node scripts/check-plugin.mjs
 
       - name: 发布
-        # 四段 → 三段映射：0.0.25.25 → 0.0.25（patch 取总提交数，单调递增）
+        # 四段 → 三段映射：1.1.2.30 → 1.1.30（patch 取总提交数，单调递增）
         run: node scripts/publish-npm.mjs --publish

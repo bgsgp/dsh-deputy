@@ -52,8 +52,9 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 - 端点只绑 `127.0.0.1`，不监听 `0.0.0.0`；
 - 所有动作都落在**隔离桌面**里，不会碰到你正在用的主桌面；
 - 没有中间人入口：不提供任意 shell 命令路由，只有 `open/close/launch/capture/input`；
-- 风险点：本机任何进程都能访问这个端口。如果你的机器上跑着不可信的本地程序，
-  把 `config.view.port` 改掉，或 `config.view.enabled = false` 关掉面板。
+- 风险点：本机进程，以及浏览器里能够请求回环地址的页面，都可能访问这个端口。
+  当前为兼容 DSH WebView 保留了跨域响应，因此不要把它当成认证后的远程控制接口；
+  不需要面板时请设置 `config.view.enabled = false`，或修改 `config.view.port` 降低误暴露。
 
 ## 已知限制
 
@@ -67,16 +68,12 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 ## 验证
 
 ```bash
-node --check client.js && node --check src/viewer.mjs
-node /path/to/smoke.mjs          # 或参考 scripts/ 下的 UF 冒烟：health → open → frame → click → close
+node --check client.js
+node --check src/viewer.mjs
+node test/run-tests.mjs
+node scripts/check-plugin.mjs
 ```
 
-冒烟实测（假宿主，Linux）：
-
-```
-health: {ok:true, platform:"linux", state:"idle"}
-open:   {ok:true, state:"opened"}
-frame:  {ok:true, w:32, h:24, pngMagic:true}
-click:  {ok:true, input:{op:"click", x:16, y:6}, width:32, height:24}
-close:  {ok:true} → frame 报“桌面已关闭”
-```
+测试中的 HTTP 面板用例会启动随机空闲端口，真实走一遍：
+health → open → 三个并发 frame（只采一次）→ click 坐标换算 → 非法输入 400 → 错误方法 405 → close。
+它使用内存假宿主，因此 Linux/macOS 也能验证协议；Windows 真实桌面仍需在目标机回归。

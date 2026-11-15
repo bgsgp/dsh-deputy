@@ -92,7 +92,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 21 项自检：打分 / 拼图 / ROI / 预算 / 闭环 / 桌面状态机
+node test/run-tests.mjs        # 24 项自检：算法 / 闭环 / 桌面状态机 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件注册自检：版本四段式、入口、工具对齐、权限声明
 node scripts/publish-npm.mjs   # npm 发布 dry-run（四段 → 三段映射）
 

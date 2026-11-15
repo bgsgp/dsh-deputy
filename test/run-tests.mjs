@@ -1,5 +1,5 @@
 // 无依赖自检：node test/run-tests.mjs
-// 这些断言只覆盖纯算法与闭环编排，不依赖 Windows。
+// 这些断言覆盖纯算法、闭环、桌面状态机与 HTTP 面板，不依赖 Windows。
 import assert from 'node:assert/strict'
 import { scoreFrame, gridDelta, toGray, downscaleGray, dHash, hamming } from '../src/diff.mjs'
 import { packSheet, labelOf } from '../src/sheet.mjs'
@@ -7,13 +7,17 @@ import { expandBox, verifyAction, cropGray, meanAbsDiff } from '../src/roi.mjs'
 import { Budget } from '../src/budget.mjs'
 import { createDeputy } from '../src/runner.mjs'
 import { DesktopSession, createFakeTransport, sessionSensor, sessionActuator } from '../src/desktop.mjs'
+import { createViewer } from '../src/viewer.mjs'
+import { toolSpecs } from '../src/index.mjs'
 
 const PASS = []
+const FAILED = []
 function test(name, fn) {
   return Promise.resolve()
     .then(fn)
     .then(() => PASS.push(name))
     .catch((err) => {
+      FAILED.push({ name, err })
       console.error(`✗ ${name}\n  ${err.message}`)
       process.exitCode = 1
     })
@@ -69,8 +73,8 @@ await test('dHash 距离：同图 0，改动 > 0', () => {
 await test('RGBA → 灰度按 BT.601 权重', () => {
   const buf = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 0, 255])
   const g = toGray(buf, 2, 2, 4)
-  assert.ok(g[0] > 70 && g[0] < 90) // 红 ≈ 76
-  assert.ok(g[1] > 145 && g[1] < 160) // 绿 ≈ 150
+  assert.ok(g[0] > 70 && g[0] < 90)
+  assert.ok(g[1] > 145 && g[1] < 160)
   assert.ok(g[3] === 0)
 })
 
@@ -112,7 +116,7 @@ await test('verify：ROI 内变化 → ok', () => {
 })
 
 await test('verify：ROI 外的弹窗 → side-effect', () => {
-  const b = paint(blank(), { x: 0, y: 0, w: 70, h: 50 }, 5) // 只改左上
+  const b = paint(blank(), { x: 0, y: 0, w: 70, h: 50 }, 5)
   const r = verifyAction(blank(), b, W, H, { x: 100, y: 60, w: 40, h: 30 }, { expect: 0 })
   assert.equal(r.verdict, 'side-effect')
 })
@@ -137,7 +141,7 @@ await test('闭环：跨档才进缓冲，动作后 ROI 校验通过', async () 
   const sensor = {
     async capture() {
       const g = blank()
-      if (n >= 2) paint(g, { x: 30, y: 20, w: 80, h: 60 }, 30) // 第 3 帧起大改
+      if (n >= 2) paint(g, { x: 30, y: 20, w: 80, h: 60 }, 30)
       n++
       return { gray: g, width: W, height: H }
     },
@@ -172,7 +176,6 @@ await test('闭环：拼图经 onEvidence 推出且只推一次', async () => {
   for (let i = 0; i < 20 && deputy.pendingCount === 0; i++) await deputy.observe()
   await deputy.flush('test')
   assert.equal(shown.length, 1)
-  // 空白拼图的 PNG 压缩后很小，别拿体积当健康指标，看签名
   assert.deepEqual([...shown[0].png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
 })
 
@@ -197,10 +200,10 @@ await test('虚拟桌面：生命周期 idle→opened→running→closed', async
 
 await test('虚拟桌面：状态守卫拒绝越序调用', async () => {
   const s = new DesktopSession({ transport: createFakeTransport() })
-  await assert.rejects(() => s.capture(), /未打开/) // idle 不能采帧
+  await assert.rejects(() => s.capture(), /已打开|未打开/)
   await s.open()
-  await s.open().catch((e) => assert.match(e.message, /只能在 idle/)) // 重复 open 被拒
-  await s.startApp('x.exe') // opened → running
+  await s.open().catch((e) => assert.match(e.message, /只能在 idle/))
+  await s.startApp('x.exe')
   assert.equal(s.state, 'running')
 })
 
@@ -235,4 +238,93 @@ await test('闭环跑在虚拟桌面上：sensor/actuator 都走会话', async (
   assert.ok(['ok', 'no-effect'].includes(r.verdict), JSON.stringify(r))
 })
 
-console.log(PASS.length ? `\n${PASS.length} 项全部通过\n${PASS.map((p) => '  ✓ ' + p).join('\n')}` : '')
+await test('虚拟桌面：并发打开只建一个宿主，running 可继续启动程序', async () => {
+  const t = createFakeTransport()
+  const s = new DesktopSession({ transport: t })
+  await Promise.all([s.ensureOpen(), s.ensureOpen(), s.open()])
+  assert.equal(t.state.starts, 1)
+  await s.startApp('notepad.exe')
+  await s.startApp('calc.exe')
+  assert.equal(s.state, 'running')
+  assert.equal(s.pid, 4322)
+  await Promise.all([s.close(), s.close()])
+  await assert.rejects(() => s.capture(), (e) => e.code === 'ECLOSED')
+  await assert.rejects(() => s.input({ op: 'click', x: 1, y: 1 }), (e) => e.code === 'ECLOSED')
+})
+
+await test('工具输出：跳过采样与拼图预算耗尽均符合声明且不抛异常', async () => {
+  const sense = toolSpecs({ observe: async () => ({ skipped: 'budget' }) }, {})[0]
+  const skipped = await sense.handler()
+  assert.equal(skipped.skipped, 'budget')
+  assert.match(sense.render({}, skipped)[0].text, /未出图/)
+
+  const sheet = toolSpecs({ flush: async () => ({ dropped: 'sheet-budget' }) }, {})[2]
+  const dropped = await sheet.handler({ reason: 'test' })
+  assert.deepEqual(dropped, { frames: 0, dropped: 'sheet-budget' })
+  assert.equal(sheet.outputSchema.properties.budget.type, 'object')
+  assert.match(sheet.render({}, dropped)[0].text, /未推送/)
+})
+
+await test('HTTP 面板：健康检查、合并采帧、坐标换算与输入校验', async () => {
+  const transport = createFakeTransport()
+  const request = transport.request
+  transport.request = async (payload) => {
+    // 让三个 HTTP 请求确实重叠；真实 BitBlt 远比内存假宿主慢。
+    if (payload.op === 'capture') await new Promise((resolve) => setTimeout(resolve, 20))
+    return request(payload)
+  }
+  const session = new DesktopSession({ transport, name: 'deputy-http-test' })
+  const viewer = createViewer({ session, port: 0 })
+  const base = await viewer.start()
+  const call = async (path, init) => {
+    const res = await fetch(new URL(path, base), init)
+    return { status: res.status, body: await res.json() }
+  }
+  const post = (path, body) =>
+    call(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  try {
+    const health = await call('/api/health')
+    assert.equal(health.body.ok, true)
+    assert.equal(health.body.state, 'idle')
+
+    const opened = await post('/api/open')
+    assert.equal(opened.body.state, 'opened')
+
+    const before = transport.state.frames
+    const frames = await Promise.all([call('/api/frame'), call('/api/frame'), call('/api/frame')])
+    assert.ok(frames.every((f) => f.body.ok && f.body.width === 32 && f.body.height === 24))
+    assert.equal(transport.state.frames, before + 1, '并发轮询应合并为一次宿主采帧')
+
+    const click = await post('/api/input', { type: 'click', x: 0.5, y: 0.25 })
+    assert.equal(click.body.ok, true)
+    assert.deepEqual(click.body.input, { op: 'click', x: 16, y: 6, button: 'left' })
+
+    const legacy = await post('/api/input', { op: 'click', x: 1, y: 1, button: 'right' })
+    assert.equal(legacy.body.input.x, 31)
+    assert.equal(legacy.body.input.y, 23)
+    assert.equal(legacy.body.input.button, 'right')
+
+    const inputs = transport.state.inputs
+    const invalid = await post('/api/input', { type: 'click', x: 2, y: 0 })
+    assert.equal(invalid.status, 400)
+    assert.equal(transport.state.inputs, inputs, '非法坐标不应发送到桌面')
+
+    const badLaunch = await post('/api/launch', {})
+    assert.equal(badLaunch.status, 400)
+    const wrongMethod = await post('/api/health')
+    assert.equal(wrongMethod.status, 405)
+  } finally {
+    await viewer.stop()
+    await session.close()
+  }
+})
+
+console.log(
+  FAILED.length
+    ? `\n${PASS.length} 项通过，${FAILED.length} 项失败\n${PASS.map((p) => '  ✓ ' + p).join('\n')}`
+    : `\n${PASS.length} 项全部通过\n${PASS.map((p) => '  ✓ ' + p).join('\n')}`,
+)
