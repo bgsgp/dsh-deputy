@@ -6,6 +6,7 @@ import { createDeputy } from './runner.mjs'
 import { packSheet } from './sheet.mjs'
 import { Budget } from './budget.mjs'
 import { DesktopSession, createHostTransport, sessionSensor, sessionActuator } from './desktop.mjs'
+import { createViewer, DEFAULT_VIEW_PORT } from './viewer.mjs'
 import * as A from './action.mjs'
 
 export const name = 'dsh-deputy'
@@ -27,9 +28,15 @@ export const config = {
     captureWidth: 1280,
     captureHeight: 800,
   },
+  // 面板（浏览器半 client.js 读的那个端点）
+  view: {
+    enabled: true,
+    host: '127.0.0.1',
+    port: DEFAULT_VIEW_PORT,
+  },
 }
 
-export const state = { session: null, deputy: null }
+export const state = { session: null, deputy: null, viewer: null }
 
 function ensureSession(deputyConfig) {
   if (state.session) return state.session
@@ -145,10 +152,27 @@ export function apply(ctx = {}) {
     )
   }
 
-  // 宿主支持生命周期钩子时，任务结束自动收桌面，不留残留
-  if (typeof ctx.onDispose === 'function') {
-    ctx.onDispose(() => session.close().catch(() => {}))
+  // 面板数据面：只绑回环地址，端口冲突时降级但不影响工具
+  const viewCfg = config.view ?? {}
+  if (viewCfg.enabled !== false) {
+    state.viewer = createViewer({
+      session,
+      host: viewCfg.host ?? '127.0.0.1',
+      port: viewCfg.port ?? DEFAULT_VIEW_PORT,
+    })
+    state.viewer
+      .start()
+      .then((url) => ctx.logger?.info?.(`[dsh-deputy] 桌面面板端点 ${url}`))
+      .catch((e) => ctx.logger?.warn?.(`[dsh-deputy] 面板端点启动失败：${e.message}（工具不受影响）`))
   }
 
-  return { deputy, session, packSheet }
+  // 宿主支持生命周期钩子时，任务结束自动收桌面，不留残留
+  if (typeof ctx.onDispose === 'function') {
+    ctx.onDispose(() => {
+      state.viewer?.stop?.().catch?.(() => {})
+      return session.close().catch(() => {})
+    })
+  }
+
+  return { deputy, session, viewer: state.viewer, packSheet }
 }

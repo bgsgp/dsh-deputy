@@ -2,22 +2,19 @@
   "name": "dsh-deputy",
   "id": "dsh-deputy",
   "description": "Change-scored desktop sensing (4x4 contact sheet) + a real isolated Windows desktop you can actually operate in.",
-  "version": "0.0.15.15",
-  "entry": {
-    "name": "dsh-deputy",
-    "main": "src/index.mjs",
-    "inject": ["sessionController", "tools", "attachments"]
-  },
+  "version": "0.0.17.17",
+  "entry": {"name": "dsh-deputy", "main": "src/index.mjs", "inject": ["sessionController", "tools", "attachments"]},
   "platforms": ["win32"],
   "provides": {
     "tools": ["deputy_sense", "deputy_act", "deputy_sheet", "deputy_desktop"],
-    "services": ["desktopSession"]
+    "services": ["desktopSession", "viewer"]
   },
   "permissions": {
     "admin": {"required": true, "reason": "CreateDesktopW(GENERIC_ALL) 与 SetThreadDesktop 需要管理员权限；不足时插件显式报错，不降级到主桌面"},
     "screen": {"required": true, "reason": "BitBlt 采集隔离桌面画面"},
     "input": {"required": true, "reason": "SendInput 在隔离桌面内模拟键鼠"},
-    "process": {"required": true, "reason": "在隔离桌面内 CreateProcess 启动目标程序"}
+    "process": {"required": true, "reason": "在隔离桌面内 CreateProcess 启动目标程序"},
+    "network": {"required": false, "reason": "面板数据面仅监听 127.0.0.1（不出网）；config.view.enabled=false 可关闭"}
   },
   "lifecycle": {"onDispose": "close-desktop"}
 }
