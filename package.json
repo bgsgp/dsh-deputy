@@ -4,6 +4,10 @@
   "description": "DSH deputy: change-scored desktop sensing packed into 4x4 contact sheets, plus a real isolated Windows desktop you can actually operate in.",
   "type": "module",
   "main": "src/index.mjs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bgsgp/dsh-deputy.git"
+  },
   "bin": {"deputy-mcp": "src/mcp/server.mjs"},
   "files": ["client.js", "src/", "scripts/", "docs/", "cordis.patch.yml", "dsh.plugin.json", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE"],
   "exports": {
