@@ -4,28 +4,41 @@ name: Publish to npm
 # 前提：npmjs.com → 包设置 → 可信的出版商，填：
 #   出版商 = GitHub Actions / 组织或用户 = bgsgp / 存储库 = dsh-deputy /
 #   工作流文件名 = publish.yml / 环境名称 = 留空
+#
+# 注意：这里故意不写 setup-node 的 registry-url。
+# 一旦写了，action 会往 .npmrc 里塞一行 `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`；
+# CI 里没有这个变量，npm 就会拿空 token 去认证，反而让 OIDC 走不通。
+# 目标 registry 由 scripts/publish-npm.mjs 的 --registry 参数显式指定。
 on: 'workflow_dispatch'
 
 permissions:
   contents: read
-  id-token: write # 可信发布的必要条件
+  id-token: write # 可信发布的必要条件，缺了就拿不到 OIDC token
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-      - name: 升级 npm（OIDC 需 11.5+）
+
+      - name: 升级 npm（可信发布需 11.5.1+）
         run: npm install -g npm@latest && npm --version
+
+      - name: 校验 OIDC 可用
+        run: |
+          test -n "$ACTIONS_ID_TOKEN_REQUEST_URL" || { echo "缺少 id-token 权限或不在 Actions 环境，无法可信发布"; exit 1; }
+          echo "OIDC 端点就绩"
+
       - name: 自检
         run: |
           node --check client.js
           node test/run-tests.mjs
           node scripts/check-plugin.mjs
+
       - name: 发布
-        # 四段 → 三段映射：0.0.23.23 → 0.0.23（patch 取总提交数，单调递增）
+        # 四段 → 三段映射：0.0.25.25 → 0.0.25（patch 取总提交数，单调递增）
         run: node scripts/publish-npm.mjs --publish
