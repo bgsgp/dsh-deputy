@@ -1,7 +1,9 @@
 // DSH 插件入口
-// 形态对齐 dsh-see-now：dsh.plugin.json 声明 entry + inject，宿主把
-// sessionController / tools / attachments 喂进来；这里额外要求一个**虚拟桌面会话**。
-// 注意：DSH 各版本的 tools 注册 API 有差异，这里做能力探测而不是硬绑一个方法名。
+// 工具声明按 DSH tools 注册表的真实契约写（对照 @deepseek-ai/dsh-tool-present）：
+//   register({ name, description, parameters, output: { schema, render }, execute })
+//  - parameters 是「每字段内联 required」的描述式 schema，不是 JSON Schema 的 required 数组；
+//  - output 是必填项，缺失会被注册表判为异常：
+//    `tool "xxx" must declare output (schema, render, presentationMeta?)`。
 import { createDeputy } from './runner.mjs'
 import { packSheet } from './sheet.mjs'
 import { Budget } from './budget.mjs'
@@ -13,22 +15,17 @@ export const name = 'dsh-deputy'
 export const inject = ['sessionController', 'tools', 'attachments']
 
 export const config = {
-  // 感知
   shipAt: 'meaningful',
   settleMs: 220,
   sense: {},
-  // 执行
   roi: {},
   budget: {},
   desktop: {
-    // 每个任务一个独立桌面；名字不传就随机
     name: null,
-    // 需要在隔离桌面里预先拉起的程序（可选）
     prelaunch: null,
     captureWidth: 1280,
     captureHeight: 800,
   },
-  // 面板（浏览器半 client.js 读的那个端点）
   view: {
     enabled: true,
     host: '127.0.0.1',
@@ -50,6 +47,20 @@ function ensureSession(deputyConfig) {
   return state.session
 }
 
+/** JSON Schema → 注册表要的 parameters（properties 提升一层，required 落到字段上） */
+export function toParameters(inputSchema = {}) {
+  const props = inputSchema.properties ?? {}
+  const required = inputSchema.required ?? []
+  const out = {}
+  for (const [key, value] of Object.entries(props)) {
+    out[key] = { ...value }
+    if (required.includes(key)) out[key].required = true
+  }
+  return out
+}
+
+const text = (s) => [{ type: 'text', text: s }]
+
 /** 描述给模型的 4 个工具：看、做、拼图、桌面会话 */
 export function toolSpecs(deputy, session) {
   return [
@@ -57,6 +68,17 @@ export function toolSpecs(deputy, session) {
       name: 'deputy_sense',
       description: '采样一帧隔离桌面，返回变化分数与档位（still/minor/meaningful/major）。低档不必看图。',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      outputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          score: { type: 'number', required: true },
+          tier: { type: 'string', required: true },
+          hashDistance: { type: 'number' },
+          box: { type: 'object' },
+        },
+      },
+      render: (_args, v) => text(`变化 ${Number(v?.score ?? 0).toFixed(3)} · ${v?.tier ?? 'unknown'}`),
       handler: async () => deputy.observe(),
     },
     {
@@ -71,12 +93,35 @@ export function toolSpecs(deputy, session) {
         },
         required: ['kind', 'payload'],
       },
+      outputSchema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          verdict: { type: 'string' },
+          retries: { type: 'number' },
+        },
+      },
+      render: (_args, v) => text(`动作${v?.ok ? '生效' : '未生效'}（${v?.verdict ?? 'n/a'}，重试 ${v?.retries ?? 0}）`),
       handler: async (args) => deputy.step(A.action(args.kind, args.payload, { expect: args.expect })),
     },
     {
       name: 'deputy_sheet',
       description: '把缓冲里"值得看"的帧压成 4×4 联系表推送进会话（一次只花一张图的钱）。',
-      inputSchema: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] },
+      inputSchema: {
+        type: 'object',
+        properties: { reason: { type: 'string', description: '为什么要看这几帧' } },
+        required: ['reason'],
+      },
+      outputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          frames: { type: 'number', required: true },
+          budget: { type: 'string' },
+        },
+      },
+      render: (_args, v) => text(v?.frames ? `推送 ${v.frames} 帧联系表（预算 ${v.budget ?? 'n/a'}）` : '没有值得推的帧'),
       handler: async (args) => {
         const ev = await deputy.flush(args.reason)
         return ev ? { frames: ev.frames.length, budget: ev.budget } : { frames: 0 }
@@ -89,28 +134,50 @@ export function toolSpecs(deputy, session) {
         type: 'object',
         properties: {
           op: { enum: ['status', 'open', 'launch', 'tree', 'close'] },
-          exe: { type: 'string' },
+          exe: { type: 'string', description: 'launch 时要启动的可执行文件' },
           args: { type: 'array', items: { type: 'string' } },
-          depth: { type: 'number' },
+          depth: { type: 'number', description: 'tree 的递归深度' },
         },
         required: ['op'],
       },
+      outputSchema: {
+        type: 'object',
+        additionalProperties: true,
+        properties: {
+          state: { type: 'string', required: true },
+          name: { type: 'string' },
+          pid: { type: 'number' },
+          error: { type: 'string' },
+        },
+      },
+      render: (_args, v) =>
+        text(`桌面 ${v?.state ?? 'unknown'}${v?.pid ? ` · pid ${v.pid}` : ''}${v?.error ? ` · ${v.error}` : ''}`),
       handler: async (args) => {
         switch (args.op) {
           case 'status':
-            return { state: session.state, name: session.name, pid: session.pid, error: session.lastError?.message ?? null }
+            return {
+              state: session.state,
+              name: session.name,
+              pid: session.pid ?? null,
+              error: session.lastError?.message ?? null,
+            }
           case 'open':
             await session.ensureOpen()
             return { state: session.state, name: session.name }
-          case 'launch':
+          case 'launch': {
             if (!args.exe) throw new Error('launch 需要 exe')
             await session.ensureOpen()
-            return session.startApp(args.exe, args.args ?? [])
-          case 'tree':
+            const r = await session.startApp(args.exe, args.args ?? [])
+            return { state: session.state, ...r }
+          }
+          case 'tree': {
             await session.ensureOpen()
-            return session.tree(args.depth ?? 4)
+            const t = await session.tree(args.depth ?? 4)
+            return { state: session.state, tree: t }
+          }
           case 'close':
-            return session.close()
+            await session.close()
+            return { state: session.state }
           default:
             throw new Error(`未知 op ${args.op}`)
         }
@@ -119,13 +186,29 @@ export function toolSpecs(deputy, session) {
   ]
 }
 
-function registerTools(ctx, specs) {
+/**
+ * 注册工具。优先走真实注册表签名（含 output）；
+ * 老宿主只认 define(name, desc, schema, handler) 时退回去，但不静默——会在日志里说明。
+ */
+export function registerTools(ctx, specs, log = () => {}) {
   const box = ctx.tools ?? {}
   const sink = []
-  for (const s of specs) {
-    if (typeof box.define === 'function') box.define(s.name, s.description, s.inputSchema, s.handler)
-    else if (typeof box.register === 'function') box.register({ ...s })
-    else sink.push(s)
+  for (const spec of specs) {
+    const def = {
+      name: spec.name,
+      description: spec.description,
+      parameters: toParameters(spec.inputSchema),
+      output: { schema: spec.outputSchema, render: spec.render },
+      execute: (args, exec) => spec.handler(args, exec),
+    }
+    if (typeof box.register === 'function') {
+      box.register(def)
+    } else if (typeof box.define === 'function') {
+      box.define(spec.name, spec.description, spec.inputSchema, spec.handler)
+      log(`[dsh-deputy] tools 只有 define()，${spec.name} 未声明 output（新宿主会判异常）`)
+    } else {
+      sink.push(spec)
+    }
   }
   return sink
 }
@@ -145,14 +228,12 @@ export function apply(ctx = {}) {
   })
   state.deputy = deputy
 
-  const unregistered = registerTools(ctx, toolSpecs(deputy, session))
+  const log = (m) => ctx.logger?.warn?.(m)
+  const unregistered = registerTools(ctx, toolSpecs(deputy, session), log)
   if (unregistered.length) {
-    ctx.logger?.warn?.(
-      `[dsh-deputy] 未找到 tools 注册接口，${unregistered.length} 个工具未挂载；可用 mcp/server.mjs 以 MCP 形态暴露`,
-    )
+    log(`[dsh-deputy] 未找到 tools 注册接口，${unregistered.length} 个工具未挂载；可用 mcp/server.mjs 以 MCP 形态暴露`)
   }
 
-  // 面板数据面：只绑回环地址，端口冲突时降级但不影响工具
   const viewCfg = config.view ?? {}
   if (viewCfg.enabled !== false) {
     state.viewer = createViewer({
@@ -166,7 +247,6 @@ export function apply(ctx = {}) {
       .catch((e) => ctx.logger?.warn?.(`[dsh-deputy] 面板端点启动失败：${e.message}（工具不受影响）`))
   }
 
-  // 宿主支持生命周期钩子时，任务结束自动收桌面，不留残留
   if (typeof ctx.onDispose === 'function') {
     ctx.onDispose(() => {
       state.viewer?.stop?.().catch?.(() => {})
