@@ -1,0 +1,39 @@
+{
+  "task": "在隔离桌面里把一份 xlsx 另存为 csv",
+  "desktop": "deputy-8f21",
+  "steps": [
+    {
+      "do": { "kind": "shell", "payload": { "op": "launch", "exe": "C:\\Program Files\\Microsoft Office\\root\\Office16\\EXCEL.EXE", "args": "\"D:\\报表\\月度.xlsx\"" } },
+      "expect": 0,
+      "note": "启动本身不改画面，expect=0 只判 side-effect"
+    },
+    { "do": { "kind": "wait", "payload": { "op": "wait", "ms": 2500 } }, "expect": 0 },
+    { "sense": true, "note": "取一张拼图确认窗口真的起来了" },
+    {
+      "do": { "kind": "uia", "payload": { "op": "invoke", "ref": { "path": [0, 1, 0] } } },
+      "expect": 0.02,
+      "note": "点「文件」菜单 → 校验菜单区有没有展开"
+    },
+    {
+      "do": { "kind": "uia", "payload": { "op": "invoke", "ref": { "path": [0, 1, 0, 3] } } },
+      "expect": 0.02,
+      "note": "点「另存为」"
+    },
+    {
+      "do": { "kind": "uia", "payload": { "op": "setValue", "ref": { "path": [0, 2, 1] }, "text": "D:\\报表\\月度.csv" } },
+      "expect": 0.03
+    },
+    {
+      "do": { "kind": "uia", "payload": { "op": "invoke", "ref": { "path": [0, 2, 4] } } },
+      "expect": 0.05,
+      "note": "点「保存」→ 弹窗出现属预期，ROI 应覆盖对话框区"
+    },
+    {
+      "do": { "kind": "uia", "payload": { "op": "invoke", "ref": { "path": [0, 0, 0] } } },
+      "expect": 0,
+      "note": "「确定」保留 CSV 格式，可能不改画面，只判 side-effect"
+    }
+  ],
+  "budget": { "maxSheetsPerTask": 6, "maxSteps": 20, "maxWallMs": 180000 },
+  "gate": ["shell", "delete", "system-settings", "uac"]
+}
