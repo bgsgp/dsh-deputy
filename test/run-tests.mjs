@@ -6,6 +6,7 @@ import { packSheet, labelOf } from '../src/sheet.mjs'
 import { expandBox, verifyAction, cropGray, meanAbsDiff } from '../src/roi.mjs'
 import { Budget } from '../src/budget.mjs'
 import { createDeputy } from '../src/runner.mjs'
+import { DesktopSession, createFakeTransport, sessionSensor, sessionActuator } from '../src/desktop.mjs'
 
 const PASS = []
 function test(name, fn) {
@@ -38,24 +39,21 @@ await test('全同帧判为 still', () => {
 })
 
 await test('小面积改动不进 meaningful 档', () => {
-  const a = blank()
   const b = paint(blank(), { x: 4, y: 4, w: 6, h: 6 })
-  const s = scoreFrame(a, b, W, H)
+  const s = scoreFrame(blank(), b, W, H)
   assert.ok(['still', 'minor'].includes(s.tier), `实际档位 ${s.tier} score=${s.score}`)
 })
 
 await test('大面积改动进 meaningful 及以上', () => {
-  const a = blank()
   const b = paint(blank(), { x: 10, y: 10, w: 90, h: 70 })
-  const s = scoreFrame(a, b, W, H)
+  const s = scoreFrame(blank(), b, W, H)
   assert.ok(['meaningful', 'major'].includes(s.tier), `实际档位 ${s.tier} score=${s.score}`)
   assert.ok(s.box.w >= 80 && s.box.h >= 60, `包围盒偏小 ${JSON.stringify(s.box)}`)
 })
 
 await test('包围盒命中改动位置（容一个网格的误差）', () => {
-  const a = blank()
   const b = paint(blank(), { x: 100, y: 60, w: 40, h: 40 })
-  const g = gridDelta(a, b, W, H)
+  const g = gridDelta(blank(), b, W, H)
   const insideX = 100 >= g.box.x && 140 <= g.box.x + g.box.w
   const insideY = 60 >= g.box.y && 100 <= g.box.y + g.box.h
   assert.ok(insideX && insideY, `box=${JSON.stringify(g.box)}`)
@@ -102,23 +100,20 @@ await test('ROI 扩张不越界', () => {
 })
 
 await test('verify：无变化 → no-effect', () => {
-  const a = blank()
-  const r = verifyAction(a, blank(), W, H, { x: 40, y: 30, w: 40, h: 30 })
+  const r = verifyAction(blank(), blank(), W, H, { x: 40, y: 30, w: 40, h: 30 })
   assert.equal(r.verdict, 'no-effect')
 })
 
 await test('verify：ROI 内变化 → ok', () => {
-  const a = blank()
   const b = paint(blank(), { x: 40, y: 30, w: 40, h: 30 }, 10)
-  const r = verifyAction(a, b, W, H, { x: 40, y: 30, w: 40, h: 30 }, { expect: 0.02 })
+  const r = verifyAction(blank(), b, W, H, { x: 40, y: 30, w: 40, h: 30 }, { expect: 0.02 })
   assert.equal(r.verdict, 'ok')
   assert.ok(r.inside > 0.3)
 })
 
 await test('verify：ROI 外的弹窗 → side-effect', () => {
-  const a = blank()
   const b = paint(blank(), { x: 0, y: 0, w: 70, h: 50 }, 5) // 只改左上
-  const r = verifyAction(a, b, W, H, { x: 100, y: 60, w: 40, h: 30 }, { expect: 0 })
+  const r = verifyAction(blank(), b, W, H, { x: 100, y: 60, w: 40, h: 30 }, { expect: 0 })
   assert.equal(r.verdict, 'side-effect')
 })
 
@@ -148,10 +143,10 @@ await test('闭环：跨档才进缓冲，动作后 ROI 校验通过', async () 
     },
   }
   const deputy = createDeputy({ sensor, actuator: { perform: async () => {} }, budget: new Budget(), policy: { settleMs: 0 } })
-  await deputy.observe() // 首帧
-  const s2 = await deputy.observe() // 无变化
+  await deputy.observe()
+  const s2 = await deputy.observe()
   assert.equal(s2.tier, 'still')
-  await deputy.observe() // 大改
+  await deputy.observe()
   assert.equal(deputy.pendingCount, 1)
   const step = await deputy.step({ kind: 'input', payload: { op: 'click', x: 70, y: 50 }, verify: { expect: 0 }, id: 'c1' })
   assert.ok(['ok', 'side-effect'].includes(step.verdict), JSON.stringify(step))
@@ -179,6 +174,65 @@ await test('闭环：拼图经 onEvidence 推出且只推一次', async () => {
   assert.equal(shown.length, 1)
   // 空白拼图的 PNG 压缩后很小，别拿体积当健康指标，看签名
   assert.deepEqual([...shown[0].png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
+})
+
+await test('虚拟桌面：生命周期 idle→opened→running→closed', async () => {
+  const t = createFakeTransport()
+  const s = new DesktopSession({ transport: t, name: 'deputy-test' })
+  assert.equal(s.state, 'idle')
+  await s.open()
+  assert.equal(s.state, 'opened')
+  await s.startApp('notepad.exe', ['a.txt'])
+  assert.equal(s.state, 'running')
+  assert.equal(s.pid, 4321)
+  const frame = await s.capture()
+  assert.equal(frame.width, 32)
+  assert.equal(frame.gray.length, 32 * 24)
+  await s.tree()
+  await s.input({ op: 'click', x: 10, y: 10 })
+  assert.equal(t.state.inputs, 1)
+  await s.close()
+  assert.equal(s.state, 'closed')
+})
+
+await test('虚拟桌面：状态守卫拒绝越序调用', async () => {
+  const s = new DesktopSession({ transport: createFakeTransport() })
+  await assert.rejects(() => s.capture(), /未打开/) // idle 不能采帧
+  await s.open()
+  await s.open().catch((e) => assert.match(e.message, /只能在 idle/)) // 重复 open 被拒
+  await s.startApp('x.exe') // opened → running
+  assert.equal(s.state, 'running')
+})
+
+await test('虚拟桌面：close 幂等且不抛', async () => {
+  const s = new DesktopSession({ transport: createFakeTransport() })
+  await s.open()
+  await s.close()
+  const again = await s.close()
+  assert.equal(again.already, true)
+})
+
+await test('虚拟桌面：关掉之后采帧直接报 ECLOSED', async () => {
+  const t = createFakeTransport()
+  const s = new DesktopSession({ transport: t })
+  await s.open()
+  await s.close()
+  assert.equal(t.state.closed, true)
+})
+
+await test('闭环跑在虚拟桌面上：sensor/actuator 都走会话', async () => {
+  const session = new DesktopSession({ transport: createFakeTransport() })
+  await session.open()
+  const deputy = createDeputy({
+    sensor: sessionSensor(session),
+    actuator: sessionActuator(session),
+    budget: new Budget(),
+    policy: { settleMs: 0 },
+  })
+  const seen = await deputy.observe()
+  assert.equal(seen.first, true)
+  const r = await deputy.step({ kind: 'input', payload: { op: 'click', x: 4, y: 4 }, verify: { expect: 0 } })
+  assert.ok(['ok', 'no-effect'].includes(r.verdict), JSON.stringify(r))
 })
 
 console.log(PASS.length ? `\n${PASS.length} 项全部通过\n${PASS.map((p) => '  ✓ ' + p).join('\n')}` : '')
