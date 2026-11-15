@@ -1,7 +1,7 @@
 {
   "name": "dsh-deputy",
-  "version": "0.1.0",
-  "description": "DSH deputy: change-scored desktop sensing packed into 4x4 contact sheets, plus UIA-first Windows desktop acting with ROI verification.",
+  "version": "0.0.9.9",
+  "description": "DSH deputy: change-scored desktop sensing packed into 4x4 contact sheets, plus a real isolated Windows desktop you can actually operate in.",
   "type": "module",
   "main": "src/index.mjs",
   "bin": {
@@ -14,11 +14,13 @@
     "cordis.patch.yml",
     "dsh.plugin.json",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
     "NOTICE"
   ],
   "exports": {
     ".": "./src/index.mjs",
+    "./desktop": "./src/desktop.mjs",
     "./runner": "./src/runner.mjs",
     "./diff": "./src/diff.mjs",
     "./sheet": "./src/sheet.mjs",
@@ -28,9 +30,11 @@
   "scripts": {
     "test": "node test/run-tests.mjs",
     "mcp": "node src/mcp/server.mjs",
-    "mcp:fake": "DEPUTY_FAKE=1 node src/mcp/server.mjs"
+    "mcp:fake": "DEPUTY_FAKE=1 node src/mcp/server.mjs",
+    "plugin:check": "node scripts/check-plugin.mjs"
   },
   "dsh": {
+    "plugin": "./dsh.plugin.json",
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
@@ -43,6 +47,7 @@
     "dsh",
     "dsh-plugin",
     "computer-use",
+    "virtual-desktop",
     "windows",
     "ui-automation",
     "desktop-automation",
@@ -51,7 +56,7 @@
   ],
   "author": "沐璃-Zero",
   "contributors": [
-    "清弦-Zero"
+    "鬼狗子-Zero"
   ],
   "license": "MIT",
   "engines": {
