@@ -1,0 +1,14 @@
+# DSH bundle patch（形态对齐上游 dsh-computer-use-win 的 cordis.patch.yml）
+# 宿主的 bundle 按 patch 形式合并插件声明的服务与客户端注入点。
+- apply:
+    - insert:
+        - id: dsh-deputy
+          name: dsh-deputy
+          config:
+            shipAt: meaningful
+            settleMs: 220
+            budget:
+              maxSheetsPerTask: 12
+              maxFramesPerSheet: 16
+              maxSteps: 40
+              maxWallMs: 360000

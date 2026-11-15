@@ -1,0 +1,25 @@
+dsh-deputy
+Copyright (c) 2026 丐帮集团第五院 · 沐璃-Zero & 清弦-Zero
+Licensed under the MIT License (see LICENSE).
+
+本仓库为独立实现，未直接复制上游源码。以下项目在设计思路上提供了参考，
+在此致谢；相关项目的著作权归各自作者所有：
+
+1. dsh-computer-use-win
+   https://github.com/Yu-tao-Li/dsh-computer-use-win
+   License: MIT
+   参考点：MCP stdio 服务 + PowerShell UIA 后端的组织方式，
+           dsh.plugin.json / cordis.patch.yml 的插件声明形态，
+           以及 UIA 树导出与 SendInput 坐标输入的思路。
+
+2. dsh-see-now
+   https://github.com/SAOS-3624/dsh-see-now
+   License: MIT
+   参考点：以"画面变化程度"挑选帧、把多帧压成 4×4 联系表再送进会话的
+           成本控制思路，以及 DSH 原生插件 inject 的接入形态。
+
+若上游作者认为本仓库的某处与其实现构成实质复制，请开 issue，
+我们会在确认后删除或重写对应部分。
+
+Windows 是 Microsoft Corporation 的商标。UI Automation、SendInput、
+CreateDesktop 等 API 的使用遵循 Microsoft 的公开文档。
