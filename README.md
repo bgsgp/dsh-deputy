@@ -11,7 +11,19 @@
 | **署名** | **鬼狗子-Zero**（立项 / 需求 / 审阅 · **第一院**） |
 | **发布** | [@bgsgp](https://github.com/bgsgp) |
 | **协议** | MIT |
-| **版本** | `0.0.9.9`（主版本.本版本.本版本提交数.总提交数） |
+| **版本** | `0.0.11.11`（主版本.本版本.本版本提交数.总提交数） |
+
+---
+
+## 安装
+
+```powershell
+dsh plugin --profile web add github:bgsgp/dsh-deputy
+dsh plugin --profile web list
+```
+
+环境要求：Windows x86_64、Node ≥ 20、管理员权限（虚拟桌面必需）。依赖数为 **0**，
+不需要 `allowBuilds`。详细步骤与验证见 [docs/INSTALL.md](docs/INSTALL.md)。
 
 ---
 
@@ -23,19 +35,14 @@
 2. **定位脓性** —— 纯坐标点击，UI 一挪位就点空，点空还看不出来，于是越点越偏。
 3. **焦点争夺** —— 自动化和用户抢同一块桌面，用户一动鼠标任务就断。
 
-对应三条主线：
+对应四条主线：
 
 | 主线 | 做法 |
 |---|---|
 | **变化即证据** | 帧的价值 = 相对上一帧变了多少；0..1 分数分四档（still/minor/meaningful/major） |
 | **语义优先** | UIA `InvokePattern`/`ValuePattern` 打头，键鼠是兜底不是首选 |
 | **ROI 校验** | 动作后只比对它该影响的区域，并额外检测"别处有没有被带脏" |
-
-第四条是 0.0.x 后期补上的，也是这次的重点：
-
-| 主线 | 做法 |
-|---|---|
-| **真开虚拟桌面** | 常驻宿主进程握着独立 Desktop，目标程序、采帧、取树、输入全在同一个桌面对象里 |
+| **真开虚拟桌面** | 常驻宿主握着独立 Desktop，目标程序、采帧、取树、输入全在同一个桌面对象里 |
 
 ---
 
@@ -87,8 +94,6 @@ node scripts/check-plugin.mjs  # 插件注册自检：版本四段式、入口�
 DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 ```
 
-安装成 DSH 插件见 [docs/INSTALL.md](docs/INSTALL.md)。
-
 ### 四个工具
 
 | 工具 | 作用 | 返回 |
@@ -113,11 +118,13 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `scripts/windows-desktop.ps1` | 🟡 原型 | 常驻宿主：建桌面 / 启动 / BitBlt / 取树 / SendInput，**未真机回归** |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 注册一致性自检 |
+| `cordis.patch.yml` | ✅ 已对齐社区格式 | `- insert: - id/name/config` |
 | MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
-| DSH 原生装载 | 🟡 待联调 | 依赖宿主 `tools` / `attachments` 实际签名 |
+| DSH 原生装载 | 🟡 待真机联调 | 依赖宿主 `tools` / `attachments` 实际签名 |
 
 **已知未验证点**：x64 `INPUT` 40 字节对齐、隔离桌面 BitBlt 是否拍到硬件加速界面、
-`SetThreadDesktop` 在 PowerShell 进程里的成功与否、UAC/安全桌面的抢占。
+`SetThreadDesktop` 在 PowerShell 进程里的成败、UAC/安全桌面的抢占。
+真机第一步先看 `deputy_desktop { op: "open" }` 返回的 `attached` 是否为 true。
 
 ---
 
@@ -153,7 +160,7 @@ src/
 scripts/
   windows-desktop.ps1  常驻宿主：建桌面 / 启动 / 采帧 / 取树 / 输入
   windows-uia.ps1      一次性 UIA（无隔离桌面，验证用）
-  windows-session.ps1  早期碎片版（已被 windows-desktop.ps1 取代，留作对照）
+  windows-session.ps1  早期碎片版（留作对照）
   check-plugin.mjs     注册一致性自检
 docs/
   DESIGN.md       总体思路与六个关键决策
@@ -161,21 +168,21 @@ docs/
   ACTING.md       动作梯度、selector、三分处置、危险闸门
   ISOLATION.md    桌面隔离原理、为什么要 UAC、与 DSH 文件沙箱的区别
   DESKTOP.md      虚拟桌面执行层：常驻宿主、硬性约束、与豆包式方案的差距
-  INSTALL.md      装成 DSH 插件的三种方式
+  INSTALL.md      安装方式、五步验证、UAC 与商城上架
   ROADMAP.md      版本计划
 ```
 
 ## 版本号规则
 
-`主版本.本版本.本版本提交数.总提交数`，`0.0.9.9` 表示"主版本 0、本版本 0、
-本版本内第 9 次提交、仓库累计第 9 次提交"。改版本时 `package.json` 与
+`主版本.本版本.本版本提交数.总提交数`。`0.0.11.11` 表示"主版本 0、本版本 0、
+本版本内第 11 次提交、仓库累计第 11 次提交"。改版本时 `package.json` 与
 `dsh.plugin.json` 必须同步，`npm run plugin:check` 会报不一致。
 
 ## 致谢与许可
 
 设计上参考了两个上游项目（**代码为独立实现，未直接复制源码**）：
 
-- [Yu-tao-Li/dsh-computer-use-win](https://github.com/Yu-tao-Li/dsh-computer-use-win) —— MCP + PowerShell UIA 后端的组织方式
+- [Yu-tao-Li/dsh-computer-use-win](https://github.com/Yu-tao-Li/dsh-computer-use-win) —— MCP + PowerShell UIA 后端的组织方式，以及 bundle patch 的真实写法
 - [SAOS-3624/dsh-see-now](https://github.com/SAOS-3624/dsh-see-now) —— 变化挑帧 + 4×4 拼图进会话的做法
 
 详见 [NOTICE](NOTICE)。本仓库以 **MIT** 发布。
