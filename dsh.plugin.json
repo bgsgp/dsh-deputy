@@ -2,7 +2,7 @@
   "name": "dsh-deputy",
   "id": "dsh-deputy",
   "description": "Change-scored desktop sensing (4x4 contact sheet) + a real isolated Windows desktop you can actually operate in.",
-  "version": "0.0.11.11",
+  "version": "0.0.12.12",
   "entry": {
     "name": "dsh-deputy",
     "main": "src/index.mjs",

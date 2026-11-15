@@ -1,4 +1,4 @@
-# 装成 DSH 插件
+# 装成 DSH 插件 / 发布到 npm
 
 > 命令形式来自 `dsh-computer-use-win` 的 PUBLISH.md（社区商城 dshmarket 的通用形式）：
 > `dsh plugin --profile <profile> add github:<owner>/<repo>`。
@@ -29,20 +29,56 @@ node scripts\check-plugin.mjs
 node test\run-tests.mjs
 ```
 
-两项都应全绿（前者 11 项断言，后者 21 项）。
+## 方式 B：从 npm 装（发布后可用）
 
-## 方式 B：本地开发（改代码时用）
+```powershell
+npm i -g dsh-deputy          # 或 npm i dsh-deputy
+dsh plugin --profile web add dsh-deputy
+```
+
+### 发布者：为什么不能直接 npm publish
+
+npm 只认**三段 semver**，而本仓库版本是四段 `主.本.本次提交数.总提交数`。
+直接 `npm publish` 会报：
+
+```
+npm error Invalid version: "0.0.12.12"
+```
+
+这是格式问题，和登录无关，必须先映射。仓库自带脚本做这件事：
+
+```powershell
+node scripts/publish-npm.mjs            # 默认 dry-run，只打印会发布什么
+node scripts/publish-npm.mjs --publish  # 真发布（需先 npm login）
+```
+
+映射规则：
+
+| 仓库（四段） | npm（三把） | 说明 |
+|---|---|---|
+| `0.0.12.12` | `0.0.12` | patch 位取**总提交数**，单调递增；原四段值保留在包的 `deputyVersion` 字段 |
+
+总提交数天然递增 → 正好满足 npm“每次发布必须换版本号、不能重复发布”的硬约束。
+
+发布前检查：
+
+```powershell
+npm whoami                  # 必须是 doghostzero
+npm view dsh-deputy version --registry=https://registry.npmjs.org   # 应报 404（名字可用）
+```
+
+注意：本机或 CI 的 registry 若指向 npmmirror，必须以
+`--registry=https://registry.npmjs.org` 发布（脚本已写死）。
+
+## 方式 C：本地开发（改代码时用）
 
 ```powershell
 git clone https://github.com/bgsgp/dsh-deputy
 cd dsh-deputy
-# 让 DSH 指向本地目录（具体子命令以 dsh plugin --help 为准）
 dsh plugin --profile web add .
 ```
 
-退出后记得 `dsh plugin --profile web remove dsh-deputy`。
-
-## 方式 C：当 MCP 服务用（宿主没有插件能力时）
+## 方式 D：当 MCP 服务用（宿主没有插件能力时）
 
 ```json
 {
@@ -61,8 +97,6 @@ dsh plugin --profile web add .
 
 ## 装完会看到什么
 
-`cordis.patch.yml` 把插件挂进 profile 后，模型侧多出 4 个工具：
-
 | 工具 | 首次调用 |
 |---|---|
 | `deputy_desktop` | `{ "op": "status" }` → `state: "idle"` |
@@ -74,7 +108,7 @@ dsh plugin --profile web add .
 
 虚拟桌面需要管理员权限，原因是 `CreateDesktopW(GENERIC_ALL)` 与 `SetThreadDesktop`
 都在受保护的操作范围内。**插件不会静默降级到主桌面**：权限不足时 `desktop.mjs`
-直接抛 `DesktopError`，任务停下并说明原因，而不是偷偷在你正在用的屏幕上乱点。
+直接抛 `DesktopError`，任务停下并说明原因。
 
 | 权限 | 用途 |
 |---|---|
@@ -84,25 +118,23 @@ dsh plugin --profile web add .
 
 ## 五步验证
 
-1. `dsh plugin --profile web list` 能看到 `dsh-deputy 0.0.10.10`；
+1. `dsh plugin --profile web list` 能看到 `dsh-deputy`；
 2. `node scripts/check-plugin.mjs` 全绿；
 3. `deputy_desktop { op: "status" }` → `idle`；
-4. `deputy_desktop { op: "open" }` → `opened`（看返回里的 UAC 与 `attached`）；
+4. `deputy_desktop { op: "open" }` → `opened`，**看返回里的 `attached` 是不是 true**；
 5. `deputy_desktop { op: "close" }` → 再 `status` 为 `closed`。
 
 第 4 步是真正的分水岭：`attached: true` 才说明 `SetThreadDesktop` 成功，
-否则后面的采帧和输入都会落在错误桌面上——先解决它，再谈跑任务。
+否则后面的采帧和输入都会落在错误桌面上。
 
 ## 上架商城（可选，要提 PR）
 
-商城 CI 的三个硬条件：`dsh.bundle` 已声明（✅）、仓库满 1 天且提交数 ≥ 10（✅ 已到 10）、
+商城 CI 三个硬条件：`dsh.bundle` 已声明（✅）、仓库满 1 天且提交数 ≥ 10（✅）、
 仓库带 `dsh-plugin` topic（需手动加）：
 
 ```powershell
 gh repo edit bgsgp/dsh-deputy --add-topic dsh-plugin
 ```
-
-然后在 `awesome-dsh-plugin` 仓库提一个 `data/plugins/bgsgp__dsh-deputy.yml` 的 PR。
 
 ## 卸载
 
@@ -110,7 +142,7 @@ gh repo edit bgsgp/dsh-deputy --add-topic dsh-plugin
 dsh plugin --profile web remove dsh-deputy
 ```
 
-插件任务结束时会走 `onDispose` 自动关桌面。若异常退出，手动清一下：
+异常退出后手动清理残留宿主：
 
 ```powershell
 Get-Process powershell | Where-Object { $_.CommandLine -like '*windows-desktop.ps1*' } | Stop-Process

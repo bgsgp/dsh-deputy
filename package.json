@@ -1,6 +1,6 @@
 {
   "name": "dsh-deputy",
-  "version": "0.0.11.11",
+  "version": "0.0.12.12",
   "description": "DSH deputy: change-scored desktop sensing packed into 4x4 contact sheets, plus a real isolated Windows desktop you can actually operate in.",
   "type": "module",
   "main": "src/index.mjs",
@@ -31,7 +31,9 @@
     "test": "node test/run-tests.mjs",
     "mcp": "node src/mcp/server.mjs",
     "mcp:fake": "DEPUTY_FAKE=1 node src/mcp/server.mjs",
-    "plugin:check": "node scripts/check-plugin.mjs"
+    "plugin:check": "node scripts/check-plugin.mjs",
+    "publish:npm": "node scripts/publish-npm.mjs",
+    "publish:npm:real": "node scripts/publish-npm.mjs --publish"
   },
   "dsh": {
     "plugin": "./dsh.plugin.json",
