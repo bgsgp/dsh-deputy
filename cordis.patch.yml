@@ -1,14 +1,16 @@
-# DSH bundle patch（形态对齐上游 dsh-computer-use-win 的 cordis.patch.yml）
-# 宿主的 bundle 按 patch 形式合并插件声明的服务与客户端注入点。
-- apply:
-    - insert:
-        - id: dsh-deputy
-          name: dsh-deputy
-          config:
-            shipAt: meaningful
-            settleMs: 220
-            budget:
-              maxSheetsPerTask: 12
-              maxFramesPerSheet: 16
-              maxSteps: 40
-              maxWallMs: 360000
+# dsh-deputy — DSH bundle patch layer
+#
+# 把 dsh-deputy 以原生插件形态挂进 profile：id 全局唯一，name 为包名。
+# 插件入口（src/index.mjs → apply(ctx)）由 dsh.plugin.json 的 entry.main 声明。
+# 本插件不依赖任何外部 npm 包（diff/sheet/png/roi/budget/runner/desktop 均为纯 ESM），
+# 因此不需要构建授权，也不需要 allowBuilds。
+
+- insert:
+    - id: dsh-deputy
+      name: 'dsh-deputy'
+      config:
+        shipAt: meaningful
+        settleMs: 220
+        desktop:
+          captureWidth: 1280
+          captureHeight: 800
