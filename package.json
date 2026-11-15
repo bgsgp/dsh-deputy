@@ -1,6 +1,6 @@
 {
   "name": "dsh-deputy",
-  "version": "0.0.17.17",
+  "version": "0.0.18.18",
   "description": "DSH deputy: change-scored desktop sensing packed into 4x4 contact sheets, plus a real isolated Windows desktop you can actually operate in.",
   "type": "module",
   "main": "src/index.mjs",
@@ -28,10 +28,7 @@
   "dsh": {
     "plugin": "./dsh.plugin.json",
     "bundle": {"patch": "./cordis.patch.yml"},
-    "client": {
-      "platform": "web",
-      "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-layout"]
-    }
+    "client": {"platform": "web", "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-layout"]}
   },
   "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "dsh-client-plugin", "computer-use", "virtual-desktop", "windows", "ui-automation", "desktop-automation", "mcp", "contact-sheet"],
   "author": "沐璃-Zero",
