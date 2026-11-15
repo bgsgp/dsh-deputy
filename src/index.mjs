@@ -1,26 +1,50 @@
 // DSH 插件入口
-// 形态对齐 dsh-see-now：dsh.plugin.json 里声明 entry + inject，运行时由宿主把
-// sessionController / tools / attachments 三个能力喂进来。
+// 形态对齐 dsh-see-now：dsh.plugin.json 声明 entry + inject，宿主把
+// sessionController / tools / attachments 喂进来；这里额外要求一个**虚拟桌面会话**。
 // 注意：DSH 各版本的 tools 注册 API 有差异，这里做能力探测而不是硬绑一个方法名。
 import { createDeputy } from './runner.mjs'
 import { packSheet } from './sheet.mjs'
-import { UiaBridge, createUiaActuator, createWindowsSensor } from './uia-bridge.mjs'
 import { Budget } from './budget.mjs'
+import { DesktopSession, createHostTransport, sessionSensor, sessionActuator } from './desktop.mjs'
 import * as A from './action.mjs'
 
 export const name = 'dsh-deputy'
 export const inject = ['sessionController', 'tools', 'attachments']
 
 export const config = {
+  // 感知
   shipAt: 'meaningful',
   settleMs: 220,
   sense: {},
+  // 执行
   roi: {},
   budget: {},
+  desktop: {
+    // 每个任务一个独立桌面；名字不传就随机
+    name: null,
+    // 需要在隔离桌面里预先拉起的程序（可选）
+    prelaunch: null,
+    captureWidth: 1280,
+    captureHeight: 800,
+  },
 }
 
-/** 描述给模型的 3 个工具：看、做、拼图 */
-export function toolSpecs(deputy) {
+export const state = { session: null, deputy: null }
+
+function ensureSession(deputyConfig) {
+  if (state.session) return state.session
+  const d = deputyConfig.desktop ?? {}
+  state.session = new DesktopSession({
+    transport: createHostTransport(),
+    name: d.name ?? undefined,
+    captureWidth: d.captureWidth,
+    captureHeight: d.captureHeight,
+  })
+  return state.session
+}
+
+/** 描述给模型的 4 个工具：看、做、拼图、桌面会话 */
+export function toolSpecs(deputy, session) {
   return [
     {
       name: 'deputy_sense',
@@ -30,7 +54,7 @@ export function toolSpecs(deputy) {
     },
     {
       name: 'deputy_act',
-      description: '执行一个动作（uia/input/shell/wait），自动校验它是否真的生效，并返回 ROI 校验结论。',
+      description: '在隔离桌面里执行一个动作（uia/input/shell/wait），自动校验它是否真的生效（ROI 三分）。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -45,14 +69,44 @@ export function toolSpecs(deputy) {
     {
       name: 'deputy_sheet',
       description: '把缓冲里"值得看"的帧压成 4×4 联系表推送进会话（一次只花一张图的钱）。',
-      inputSchema: {
-        type: 'object',
-        properties: { reason: { type: 'string' } },
-        required: ['reason'],
-      },
+      inputSchema: { type: 'object', properties: { reason: { type: 'string' } }, required: ['reason'] },
       handler: async (args) => {
         const ev = await deputy.flush(args.reason)
         return ev ? { frames: ev.frames.length, budget: ev.budget } : { frames: 0 }
+      },
+    },
+    {
+      name: 'deputy_desktop',
+      description: '管理虚拟桌面会话：status 看状态，open 开新桌面（需管理员），launch 在里面启动程序，tree 取该桌面的窗口树，close 收起。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          op: { enum: ['status', 'open', 'launch', 'tree', 'close'] },
+          exe: { type: 'string' },
+          args: { type: 'array', items: { type: 'string' } },
+          depth: { type: 'number' },
+        },
+        required: ['op'],
+      },
+      handler: async (args) => {
+        switch (args.op) {
+          case 'status':
+            return { state: session.state, name: session.name, pid: session.pid, error: session.lastError?.message ?? null }
+          case 'open':
+            await session.ensureOpen()
+            return { state: session.state, name: session.name }
+          case 'launch':
+            if (!args.exe) throw new Error('launch 需要 exe')
+            await session.ensureOpen()
+            return session.startApp(args.exe, args.args ?? [])
+          case 'tree':
+            await session.ensureOpen()
+            return session.tree(args.depth ?? 4)
+          case 'close':
+            return session.close()
+          default:
+            throw new Error(`未知 op ${args.op}`)
+        }
       },
     },
   ]
@@ -70,25 +124,31 @@ function registerTools(ctx, specs) {
 }
 
 export function apply(ctx = {}) {
-  const bridge = new UiaBridge()
+  const session = ensureSession(config)
   const deputy = createDeputy({
-    sensor: createWindowsSensor(bridge),
-    actuator: createUiaActuator(bridge),
+    sensor: sessionSensor(session),
+    actuator: sessionActuator(session),
     budget: new Budget(config.budget),
     policy: config,
     onEvidence: async (ev) => {
-      // 走 DSH 的 attachments，把 PNG 作为会话附件推进去
       if (ctx.attachments?.add) {
         await ctx.attachments.add({ name: `deputy-sheet-${Date.now()}.png`, mime: 'image/png', data: ev.png })
       }
     },
   })
+  state.deputy = deputy
 
-  const unregistered = registerTools(ctx, toolSpecs(deputy))
+  const unregistered = registerTools(ctx, toolSpecs(deputy, session))
   if (unregistered.length) {
     ctx.logger?.warn?.(
       `[dsh-deputy] 未找到 tools 注册接口，${unregistered.length} 个工具未挂载；可用 mcp/server.mjs 以 MCP 形态暴露`,
     )
   }
-  return { deputy, bridge, packSheet }
+
+  // 宿主支持生命周期钩子时，任务结束自动收桌面，不留残留
+  if (typeof ctx.onDispose === 'function') {
+    ctx.onDispose(() => session.close().catch(() => {}))
+  }
+
+  return { deputy, session, packSheet }
 }
