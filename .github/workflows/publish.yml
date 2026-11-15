@@ -1,0 +1,31 @@
+name: Publish to npm
+
+# 可信发布（Trusted Publishing / OIDC）：不需要 NPM_TOKEN，也不需要仓库 secrets。
+# 前提：npmjs.com → 包设置 → 可信的出版商，填：
+#   出版商 = GitHub Actions / 组织或用户 = bgsgp / 存储库 = dsh-deputy /
+#   工作流文件名 = publish.yml / 环境名称 = 留空
+on: 'workflow_dispatch'
+
+permissions:
+  contents: read
+  id-token: write # 可信发布的必要条件
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - name: 升级 npm（OIDC 需 11.5+）
+        run: npm install -g npm@latest && npm --version
+      - name: 自检
+        run: |
+          node --check client.js
+          node test/run-tests.mjs
+          node scripts/check-plugin.mjs
+      - name: 发布
+        # 四段 → 三段映射：0.0.23.23 → 0.0.23（patch 取总提交数，单调递增）
+        run: node scripts/publish-npm.mjs --publish
