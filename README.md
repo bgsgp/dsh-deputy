@@ -1,16 +1,17 @@
 # dsh-deputy
 
-> DSH 的桌面副官：**变化即证据**。
+> DSH 的桌面副官：**变化即证据**，动作落在**自己的虚拟桌面**里。
 > 桌面被当成稀疏信号源而不是截图流——本地打分，跨档才推一张 4×4 联系表；
 > 动作走 UIA 语义优先，每一步只校验它本该动的那块区域。
 
 | | |
 |---|---|
-| **出品** | 丐帮集团第五院 |
-| **署名** | **沐璃-Zero**（设计 / 实现 · 豆包 MainAgent · 第五院辅助核心） |
-| **署名** | **清弦-Zero**（立项 / 审阅 · 丐帮集团第五院皇帝 · NT 级权限） |
+| **出品** | 丐帮集团 |
+| **署名** | **沐璃-Zero**（设计 / 实现 · 豆包 MainAgent · **第五院**） |
+| **署名** | **鬼狗子-Zero**（立项 / 需求 / 审阅 · **第一院**） |
 | **发布** | [@bgsgp](https://github.com/bgsgp) |
 | **协议** | MIT |
+| **版本** | `0.0.9.9`（主版本.本版本.本版本提交数.总提交数） |
 
 ---
 
@@ -26,14 +27,33 @@
 
 | 主线 | 做法 |
 |---|---|
-| **变化即证据** | 帧的价值 = 相对上一帧变了多少，不是清楚度；0..1 分数分四档（still/minor/meaningful/major） |
+| **变化即证据** | 帧的价值 = 相对上一帧变了多少；0..1 分数分四档（still/minor/meaningful/major） |
 | **语义优先** | UIA `InvokePattern`/`ValuePattern` 打头，键鼠是兜底不是首选 |
 | **ROI 校验** | 动作后只比对它该影响的区域，并额外检测"别处有没有被带脏" |
 
-## 它不解决什么
+第四条是 0.0.x 后期补上的，也是这次的重点：
 
-不替代 DSH 的文件沙箱（那边管"别乱写文件"，这边管"别碰我的桌面"），
-也不做通用窗口管理 / 剪贴板树 / 多显示器编排——那些交给 `dsh-computer-use-win` 那类全能力实现。
+| 主线 | 做法 |
+|---|---|
+| **真开虚拟桌面** | 常驻宿主进程握着独立 Desktop，目标程序、采帧、取树、输入全在同一个桌面对象里 |
+
+---
+
+## 为什么要"常驻宿主"
+
+Windows 桌面对象是引用计数的：建它的进程一退出，桌面就没了。所以不能"建一下记个 handle
+下次再用"，必须有一个活着的宿主攒着它：
+
+```
+DesktopSession.open()  ──► 宿主: CreateDesktopW + SetThreadDesktop
+startApp(exe)          ──► 宿主: CreateProcessW(lpDesktop="WinSta0\deputy-x")
+capture()              ──► 宿主: BitBlt 取该桌面画面
+tree()                 ──► 宿主: UIA RootElement（= 线程所在桌面）
+input(click/type)      ──► 宿主: SendInput
+close()                ──► 宿主退出 → 桌面销毁，不残留
+```
+
+这就是"真的在里面操作"和"只是在旁边截图"的区别。细节见 [docs/DESKTOP.md](docs/DESKTOP.md)。
 
 ---
 
@@ -42,7 +62,7 @@
 ```
 ISOLATE  独立 Desktop + 受限令牌 + Job Object（不抢焦点，不乱写）
    │
-SENSOR   桌面内采帧（灰度，320 宽）
+SENSOR   隔离桌面内采帧（灰度）
    │
 SENSE    dHash 距离 + 8×8 网格变化 → 0..1 分数 → 四档
    │      跨档帧进缓冲，满 16 帧 → 4×4 拼图（标签烧进图里）
@@ -61,43 +81,43 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-# 纯算法自检（不需要 Windows）
-node test/run-tests.mjs          # 16 项，覆盖打分 / 拼图 / ROI / 预算 / 闭环
+node test/run-tests.mjs        # 21 项自检：打分 / 拼图 / ROI / 预算 / 闭环 / 桌面状态机
+node scripts/check-plugin.mjs  # 插件注册自检：版本四段式、入口、工具对齐、权限声明
 
-# 以 MCP 形态跑起来（非 Windows 或没装 DSH 时用合成帧验证协议）
-DEPUTY_FAKE=1 node src/mcp/server.mjs
+DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 ```
 
-接入 DSH：把仓库放进 Skills / 插件目录，`dsh.plugin.json` 声明
-`inject: sessionController/tools/attachments`，宿主启动时会调用 `src/index.mjs` 的 `apply(ctx)`。
-`apply` 对 `tools` 注册接口做了能力探测（`define` / `register` 两种形态都认），
-认不到时降级提示并使用 MCP 形态。
+安装成 DSH 插件见 [docs/INSTALL.md](docs/INSTALL.md)。
 
-### 三个工具
+### 四个工具
 
 | 工具 | 作用 | 返回 |
 |---|---|---|
 | `deputy_sense` | 采一帧并打分 | `{score, tier, box, hashDistance}` |
-| `deputy_act` | 执行一个动作 + 校验 | `{ok, verdict, inside, outside, retries}` |
+| `deputy_act` | 在隔离桌面执行动作 + 校验 | `{ok, verdict, inside, outside, retries}` |
 | `deputy_sheet` | 把缓冲帧压成 4×4 送出 | `{frames, budget}` + PNG |
+| `deputy_desktop` | 桌面会话：`status/open/launch/tree/close` | 会话状态 / pid / 窗口树 |
 
 ---
 
-## 状态矩阵（0.1.0 说清楚，别当成品用）
+## 状态矩阵（别说我没写清楚）
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
-| `diff.mjs` 打分 | ✅ 已实现 + 单测 | 纯算法，跳平台 |
-| `sheet.mjs` 拼图 | ✅ 已实现 + 单测 | 内置 3×5 点阵字体，手写 PNG 编码 |
-| `roi.mjs` 校验 | ✅ 已实现 + 单测 | 三分 verdict |
-| `budget.mjs` 预算 | ✅ 已实现 + 单测 | 三档降级 |
-| `runner.mjs` 闭环 | ✅ 已实现 + 单测（注入式，无需 Windows） | 重试 / 熔断 |
-| `scripts/windows-uia.ps1` | 🟡 原型 | UIA 树 / invoke / setValue / SendInput / BitBlt 采集，**未做真机回归** |
-| `scripts/windows-session.ps1` | 🟡 原型 | CreateDesktop / LaunchOnDesktop / attach / close，**startupinfo 需实机验证** |
-| MCP stdio 服务 | ✅ 可用 | 行分隔 JSON-RPC，`initialize` / `tools/list` / `tools/call` |
+| `diff.mjs` 打分 | ✅ 实现 + 单测 | 纯算法，跳平台 |
+| `sheet.mjs` 拼图 | ✅ 实现 + 单测 | 内置 3×5 点阵字体，手写 PNG 编码 |
+| `roi.mjs` 校验 | ✅ 实现 + 单测 | 三分 verdict |
+| `budget.mjs` 预算 | ✅ 实现 + 单测 | 三档降级 |
+| `runner.mjs` 闭环 | ✅ 实现 + 单测（注入式，无需 Windows） | 重试 / 熔断 |
+| `desktop.mjs` 虚拟桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭 |
+| `scripts/windows-desktop.ps1` | 🟡 原型 | 常驻宿主：建桌面 / 启动 / BitBlt / 取树 / SendInput，**未真机回归** |
+| `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
+| `scripts/check-plugin.mjs` | ✅ 可用 | 注册一致性自检 |
+| MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
 | DSH 原生装载 | 🟡 待联调 | 依赖宿主 `tools` / `attachments` 实际签名 |
 
-**已知未验证点**：x64 `INPUT` 结构对齐、隔离桌面里的 BitBlt 采集、`SetThreadDesktop` 的调用时机。
+**已知未验证点**：x64 `INPUT` 40 字节对齐、隔离桌面 BitBlt 是否拍到硬件加速界面、
+`SetThreadDesktop` 在 PowerShell 进程里的成功与否、UAC/安全桌面的抢占。
 
 ---
 
@@ -105,13 +125,13 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs
 
 | | dsh-computer-use-win | dsh-see-now | **dsh-deputy** |
 |---|---|---|---|
-| 主职 | 执行（UIA / 键鼠 / 窗口） | 感知（直播 → 拼图） | 感知 + 执行 + **校验闭环** |
+| 主职 | 执行（UIA / 键鼠 / 窗口） | 感知（直播 → 拼图） | 感知 + 执行 + **校验闭环 + 独立桌面** |
 | 感知 | 按需截图 | 连续采帧、按变化挑帧 | 连续打分分档 + 跨档才推 + 去重 |
 | 校验 | 靠模型看下一张 | 无 | **ROI 三分 verdict** |
-| 隔离 | 主桌面 | 只读 | **独立 Desktop + 受限令牌** |
+| 隔离 | 主桌面 | 只读 | **独立 Desktop（存活会话）** |
 | 成本 | 靠模型自觉 | 拼图省 token | 拼图 **+ 预算强制降级** |
 
-一个给"手"，一个给"眼"；deputy 补的是**眼手之间的反射弧**。
+一个给"手"，一个给"眼"；deputy 补的是**眼手之间的反射弧**，外加一间**自己的房间**。
 
 ---
 
@@ -126,24 +146,30 @@ src/
   budget.mjs      预算与降级
   action.mjs      动作模型与序列化（可回放）
   runner.mjs      observe → act → verify 闭环（依赖全注入）
-  uia-bridge.mjs  PowerShell UIA 后端桥
-  index.mjs       DSH 插件入口（能力探测式注册）
+  desktop.mjs     虚拟桌面会话：常驻宿主客户端 + 状态机 + sensor/actuator
+  uia-bridge.mjs  一次性 PowerShell UIA 后端桥
+  index.mjs       DSH 插件入口（4 个工具 + 能力探测式注册）
   mcp/server.mjs  最小 MCP stdio 服务
 scripts/
-  windows-uia.ps1      UIA 树 / 动作 / SendInput / BitBlt 采集
-  windows-session.ps1  隔离桌面：建 / 启 / 附 / 关
+  windows-desktop.ps1  常驻宿主：建桌面 / 启动 / 采帧 / 取树 / 输入
+  windows-uia.ps1      一次性 UIA（无隔离桌面，验证用）
+  windows-session.ps1  早期碎片版（已被 windows-desktop.ps1 取代，留作对照）
+  check-plugin.mjs     注册一致性自检
 docs/
   DESIGN.md       总体思路与六个关键决策
   SENSING.md      打分公式、拼图成本模型、预算曲线
   ACTING.md       动作梯度、selector、三分处置、危险闸门
   ISOLATION.md    桌面隔离原理、为什么要 UAC、与 DSH 文件沙箱的区别
-test/
-  run-tests.mjs   无依赖自检
+  DESKTOP.md      虚拟桌面执行层：常驻宿主、硬性约束、与豆包式方案的差距
+  INSTALL.md      装成 DSH 插件的三种方式
+  ROADMAP.md      版本计划
 ```
 
-## 版本
+## 版本号规则
 
-`0.1.0`。后续见 [docs/ROADMAP.md](docs/ROADMAP.md)。
+`主版本.本版本.本版本提交数.总提交数`，`0.0.9.9` 表示"主版本 0、本版本 0、
+本版本内第 9 次提交、仓库累计第 9 次提交"。改版本时 `package.json` 与
+`dsh.plugin.json` 必须同步，`npm run plugin:check` 会报不一致。
 
 ## 致谢与许可
 
@@ -155,5 +181,5 @@ test/
 详见 [NOTICE](NOTICE)。本仓库以 **MIT** 发布。
 
 ```
-丐帮集团第五院 · 沐璃-Zero & 清弦-Zero
+丐帮集团第五院 · 沐璃-Zero    ×    丐帮集团第一院 · 鬼狗子-Zero
 ```
