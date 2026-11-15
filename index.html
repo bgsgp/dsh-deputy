@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsh-deputy · 把桌面变成可测量的信号</title>
+<meta name="description" content="dsh-deputy 是 DeepSeek Harness 的桌面代理插件：变化评分感知、4×4 联系表、真实隔离的 Windows 桌面，以及能在 DSH 里手动点击的虚拟桌面浮窗。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230D1215'/%3E%3Crect x='6' y='9' width='20' height='14' rx='2' fill='none' stroke='%2346D3B4' stroke-width='1.6'/%3E%3Cpath d='M14 16h8M18 13v6' stroke='%23E8B04B' stroke-width='2'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Serif+SC:wght@600;700&family=Noto+Sans+SC:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#0D1215;
+  --panel:#121A1E;
+  --panel-2:#162025;
+  --line:rgba(230,238,240,.10);
+  --line-strong:rgba(230,238,240,.18);
+  --ink:#E6EEF0;
+  --muted:#8CA1A8;
+  --muted-2:#63757B;
+  --teal:#46D3B4;
+  --teal-dim:#1F6F60;
+  --amber:#E8B04B;
+  --clay:#E2603F;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:'Noto Sans SC',-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
+  --serif:'Noto Serif SC','Songti SC',Georgia,serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:var(--sans);font-weight:300;font-size:16px;line-height:1.8;
+  -webkit-font-smoothing:antialiased;
+}
+/* 背景只留一层极淡的扫描栅格 */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(rgba(70,211,180,.035) 1px,transparent 1px);
+  background-size:100% 3px;
+  mask-image:radial-gradient(120% 80% at 50% 0%,#000 20%,transparent 75%);
+}
+.wrap{position:relative;z-index:1;max-width:1120px;margin:0 auto;padding:0 28px}
+
+/* 顶栏 */
+.topbar{position:sticky;top:0;z-index:5;backdrop-filter:blur(14px);background:rgba(13,18,21,.82);border-bottom:1px solid var(--line)}
+.topbar .wrap{display:flex;align-items:center;gap:18px;height:58px}
+.brand{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:14px;letter-spacing:.02em;color:var(--ink);text-decoration:none}
+.brand svg{width:22px;height:22px;flex:none}
+.brand .dim{color:var(--muted-2)}
+.topnav{margin-left:auto;display:flex;align-items:center;gap:22px;font-family:var(--mono);font-size:12.5px}
+.topnav a{color:var(--muted);text-decoration:none;border-bottom:1px solid transparent;padding-bottom:2px;transition:color .18s,border-color .18s}
+.topnav a:hover,.topnav a:focus-visible{color:var(--teal);border-color:var(--teal-dim)}
+.vchip{font-family:var(--mono);font-size:11.5px;color:var(--teal);border:1px solid var(--teal-dim);border-radius:2px;padding:2px 7px;white-space:nowrap}
+
+/* Hero */
+.hero{padding:78px 0 62px;display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);gap:56px;align-items:start}
+h1{font-family:var(--serif);font-weight:700;font-size:clamp(38px,5.4vw,62px);line-height:1.22;letter-spacing:-.01em;margin:0 0 22px;text-wrap:balance}
+h1 em{font-style:normal;color:var(--teal)}
+.lede{color:var(--muted);font-size:17px;line-height:1.9;max-width:34em;margin:0 0 30px}
+.lede strong{color:var(--ink);font-weight:500}
+.cmd{border:1px solid var(--line-strong);background:var(--panel);display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:3px;font-family:var(--mono);font-size:13px;max-width:520px}
+.cmd .sigil{color:var(--teal);flex:none}
+.cmd code{flex:1;min-width:0;overflow:auto;white-space:nowrap;color:var(--ink);scrollbar-width:none}
+.cmd code::-webkit-scrollbar{display:none}
+.copy{flex:none;background:transparent;border:1px solid var(--line-strong);color:var(--muted);font-family:var(--mono);font-size:11.5px;padding:4px 9px;border-radius:2px;cursor:pointer;transition:.18s}
+.copy:hover{border-color:var(--teal);color:var(--teal)}
+.copy[data-done]{border-color:var(--teal);color:var(--teal)}
+.meta-row{display:flex;flex-wrap:wrap;gap:10px 26px;margin-top:14px;font-family:var(--mono);font-size:12px;color:var(--muted-2)}
+.meta-row span b{color:var(--muted);font-weight:400}
+
+/* 探针 */
+.probe{border:1px solid var(--line-strong);background:var(--panel);border-radius:3px;padding:20px 20px 22px}
+.probe-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;font-family:var(--mono);font-size:11.5px;color:var(--muted-2);margin-bottom:16px}
+.probe-head b{color:var(--ink);font-weight:500}
+.score{font-family:var(--mono);font-size:34px;line-height:1;color:var(--ink);letter-spacing:-.02em}
+.score small{font-size:12px;color:var(--muted-2);margin-left:6px;letter-spacing:0}
+.tier{margin-top:8px;font-family:var(--mono);font-size:12.5px;color:var(--teal)}
+.bands{display:grid;grid-template-columns:repeat(4,1fr);gap:2px;margin:16px 0 8px;height:10px}
+.bands i{display:block;background:var(--panel-2);position:relative;overflow:hidden}
+.bands i::after{content:"";position:absolute;inset:0;background:var(--band);opacity:.18}
+.bands i.on::after{opacity:1}
+.bands i:nth-child(1){--band:#46607A}
+.bands i:nth-child(2){--band:#46D3B4}
+.bands i:nth-child(3){--band:#E8B04B}
+.bands i:nth-child(4){--band:#E2603F}
+.bands-label{display:grid;grid-template-columns:repeat(4,1fr);gap:2px;font-family:var(--mono);font-size:10.5px;color:var(--muted-2)}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:26px;background:transparent;margin:12px 0 0;cursor:ew-resize}
+input[type=range]::-webkit-slider-runnable-track{height:2px;background:var(--line-strong)}
+input[type=range]::-moz-range-track{height:2px;background:var(--line-strong)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;margin-top:-6px;border-radius:50%;background:var(--teal);border:none}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--teal);border:none}
+input[type=range]:focus-visible{outline:1px solid var(--teal);outline-offset:6px}
+.probe-note{margin:14px 0 0;font-size:13px;line-height:1.75;color:var(--muted);min-height:3.4em}
+.probe-note b{color:var(--ink);font-weight:500}
+
+/* 联系表 */
+.sheet{margin-top:16px;border:1px solid var(--line);border-radius:3px;padding:10px;background:#0A0F11}
+.sheet-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:4px}
+.sheet-grid i{display:block;aspect-ratio:4/3;background:#223037}
+.sheet-cap{display:flex;justify-content:space-between;gap:10px;font-family:var(--mono);font-size:10.5px;color:var(--muted-2);margin-top:8px}
+
+/* 区块 */
+section{padding:64px 0;border-top:1px solid var(--line)}
+.sec-head{display:grid;grid-template-columns:minmax(0,220px) minmax(0,1fr);gap:40px;align-items:start;margin-bottom:40px}
+.sec-head h2{font-family:var(--serif);font-weight:600;font-size:26px;line-height:1.4;margin:0}
+.sec-head p{margin:0;color:var(--muted);font-size:15.5px;line-height:1.85;max-width:40em}
+
+.loop{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--line);border-radius:3px;overflow:hidden}
+.step{padding:26px 24px 28px;border-right:1px solid var(--line);min-width:0}
+.step:last-child{border-right:none}
+.step .n{font-family:var(--mono);font-size:11px;color:var(--teal);letter-spacing:.08em}
+.step h3{margin:10px 0 8px;font-size:16.5px;font-weight:500;letter-spacing:.01em}
+.step p{margin:0;font-size:14px;line-height:1.8;color:var(--muted)}
+.step .io{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted-2);line-height:1.9;word-break:break-word}
+.step .io em{font-style:normal;color:var(--teal)}
+
+.fnlist{margin-top:26px;border-top:1px solid var(--line)}
+.fn{display:grid;grid-template-columns:minmax(0,150px) minmax(0,1fr);gap:28px;padding:18px 0;border-bottom:1px solid var(--line);align-items:baseline}
+.fn code{font-family:var(--mono);font-size:13px;color:var(--teal)}
+.fn p{margin:0;font-size:14.5px;color:var(--muted);line-height:1.8}
+
+/* 插槽表 */
+table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:14px}
+colgroup col:nth-child(1){width:30%}
+colgroup col:nth-child(2){width:22%}
+colgroup col:nth-child(3){width:48%}
+th,td{text-align:left;padding:14px 16px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-family:var(--mono);font-size:11.5px;font-weight:400;color:var(--muted-2);letter-spacing:.04em;border-bottom-color:var(--line-strong)}
+td:first-child{font-family:var(--mono);font-size:12.5px;color:var(--ink)}
+td p{color:var(--muted);line-height:1.75;margin:0}
+.pick{color:var(--teal);font-family:var(--mono);font-size:11.5px;margin-top:4px}
+
+.dual{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:40px}
+.panelbox{border:1px solid var(--line);background:var(--panel);border-radius:3px;padding:22px 22px 24px;min-width:0}
+.panelbox h3{margin:0 0 6px;font-size:15px;font-weight:500}
+.panelbox h3 span{font-family:var(--mono);font-size:11px;color:var(--muted-2);margin-left:8px;letter-spacing:.03em}
+.panelbox p{margin:0 0 16px;font-size:13.5px;color:var(--muted);line-height:1.8}
+pre{margin:0;background:#0A0F11;border:1px solid var(--line);border-radius:3px;padding:14px 16px;overflow:auto;font-family:var(--mono);font-size:12.5px;line-height:1.85;color:var(--ink)}
+pre .c{color:var(--muted-2)}
+pre .t{color:var(--teal)}
+pre .a{color:var(--amber)}
+.limits{list-style:none;margin:0;padding:0}
+.limits li{display:grid;grid-template-columns:14px minmax(0,1fr);gap:12px;padding:11px 0;border-bottom:1px solid var(--line);font-size:13.5px;color:var(--muted);line-height:1.75}
+.limits li:last-child{border-bottom:none}
+.limits li::before{content:"";width:6px;height:6px;margin-top:8px;background:var(--amber);border-radius:1px;display:block}
+.limits li b{color:var(--ink);font-weight:500}
+
+footer{border-top:1px solid var(--line);padding:38px 0 54px}
+.foot{display:flex;flex-wrap:wrap;gap:18px 40px;align-items:flex-end;justify-content:space-between}
+.sig{font-family:var(--mono);font-size:12px;color:var(--muted);line-height:2}
+.sig b{color:var(--ink);font-weight:400}
+.footlinks{display:flex;flex-wrap:wrap;gap:20px;font-family:var(--mono);font-size:12px}
+.footlinks a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--line-strong);padding-bottom:2px}
+.footlinks a:hover,.footlinks a:focus-visible{color:var(--teal);border-color:var(--teal-dim)}
+
+@media (max-width:920px){
+  .hero{grid-template-columns:minmax(0,1fr);gap:40px;padding:52px 0 44px}
+  .sec-head{grid-template-columns:minmax(0,1fr);gap:14px}
+  .loop{grid-template-columns:minmax(0,1fr)}
+  .step{border-right:none;border-bottom:1px solid var(--line)}
+  .step:last-child{border-bottom:none}
+  .dual{grid-template-columns:minmax(0,1fr);gap:24px}
+  .fn{grid-template-columns:minmax(0,1fr);gap:6px}
+}
+@media (max-width:640px){
+  .wrap{padding:0 18px}
+  .topnav{gap:14px;font-size:11.5px}
+  .topnav .hide-sm{display:none}
+  .hero{padding-top:40px}
+  section{padding:46px 0}
+  table{font-size:12.5px}
+  th,td{padding:12px 10px}
+  colgroup col:nth-child(1){width:38%}
+  colgroup col:nth-child(2){width:24%}
+  colgroup col:nth-child(3){width:38%}
+  h1{font-size:34px}
+  .foot{gap:22px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important}
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="3" width="26" height="26" rx="5" fill="none" stroke="#46D3B4" stroke-width="1.5"/><path d="M13 16h9M17.5 12.5v7" stroke="#E8B04B" stroke-width="2"/></svg>
+      dsh-deputy <span class="dim">/ deepseek harness</span>
+    </a>
+    <nav class="topnav">
+      <a class="hide-sm" href="#flow">闭环</a>
+      <a class="hide-sm" href="#slot">浮窗</a>
+      <a href="#install">安装</a>
+      <a href="https://github.com/bgsgp/dsh-deputy">GitHub</a>
+      <a href="https://www.npmjs.com/package/dsh-deputy">npm</a>
+      <span class="vchip">v0.0.25</span>
+    </nav>
+  </div>
+</div>
+
+<a id="top"></a>
+<div class="wrap">
+  <div class="hero">
+    <div>
+      <h1>把桌面变成<em>可测量的信号</em>，<br>而不是一堆截图</h1>
+      <p class="lede">
+        大多数桌面代理的做法是「截一张图丢给模型」。dsh-deputy 换了个方向：先<strong>量化变化</strong>，
+        只有分数越过阈值才付一张图的成本；真要看时压成 <strong>4×4 联系表</strong>；
+        真要动手时，在<strong>真正隔离的 Windows 桌面</strong>里点，而不是在你的桌面上点。
+      </p>
+
+      <div class="cmd">
+        <span class="sigil">$</span>
+        <code id="cmd1">pnpm add dsh-deputy --registry=https://registry.npmjs.org/</code>
+        <button class="copy" data-copy="cmd1">复制</button>
+      </div>
+      <div class="meta-row">
+        <span>npm <b>dsh-deputy</b></span>
+        <span>宿主 <b>DeepSeek Harness</b></span>
+        <span>平台 <b>Windows x86-64</b></span>
+        <span>许可 <b>MIT</b></span>
+      </div>
+    </div>
+
+    <div>
+      <div class="probe">
+        <div class="probe-head"><span>变化探针 · deputy_sense</span><span><b>0.4</b> dHash ＋ <b>0.6</b> 8×8 网格</span></div>
+        <div class="score"><span id="scoreVal">0.420</span><small>/ 1.000</small></div>
+        <div class="tier" id="tierVal">tier · meaningful</div>
+        <div class="bands" id="bands" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <div class="bands-label"><span>still</span><span>minor</span><span>meaningful</span><span>major</span></div>
+        <input type="range" id="scoreRange" min="0" max="1000" value="420" aria-label="拖动查看不同档位下的建议动作" aria-describedby="probeNote">
+        <p class="probe-note" id="probeNote"></p>
+      </div>
+
+      <div class="sheet">
+        <div class="sheet-grid" id="sheetGrid" aria-hidden="true"></div>
+        <div class="sheet-cap"><span>16 帧 → 4×4 灰度 PNG</span><span>内置 3×5 点阵字体</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<section id="flow">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>观察 → 动作 → 校验，<br>三步一个闭环</h2>
+      <p>
+        每一次动作都被当作一次实验：做之前在动作区域留基线，做完立刻复采，把结果分成「生效」「没效果」「有副作用」三种。
+        没生效就重试或换策略，有副作用就停下并报告——而不是假设自己点对了。
+      </p>
+    </div>
+
+    <div class="loop">
+      <div class="step">
+        <div class="n">01 / observe</div>
+        <h3>采一帧，只算分数</h3>
+        <p>dHash 汉明距离与 8×8 网格逐格差值加权成 0..1 的分数，落在四档之一。低档直接返回文字，不烧掉一次视觉预算。</p>
+        <div class="io">→ <em>score</em> · tier · box</div>
+      </div>
+      <div class="step">
+        <div class="n">02 / act</div>
+        <h3>在隔离桌面里动手</h3>
+        <p>UIA 找控件、SendInput 发事件、或直接起进程。所有动作都发生在独立桌面，你的主桌面不会被抢焦点。</p>
+        <div class="io">→ <em>uia</em> / input / shell / wait</div>
+      </div>
+      <div class="step">
+        <div class="n">03 / verify</div>
+        <h3>复采，判三分</h3>
+        <p>只在动作区域内比对，避免整屏噪声干扰。得分不足则判「没效果」并重试，区域外出现大变化则判「有副作用」。</p>
+        <div class="io">→ <em>ok</em> / no-effect / side-effect</div>
+      </div>
+    </div>
+
+    <div class="fnlist">
+      <div class="fn">
+        <code>deputy_sense</code>
+        <p>采样一帧并返回分数与档位。它就是预算阀门：still 与 minor 只需要一次像素比对，不需要模型去看图。</p>
+      </div>
+      <div class="fn">
+        <code>deputy_act</code>
+        <p>执行一个动作并自动校验。参数是 kind + payload + 期望变化量，返回值是三分结论与重试次数。</p>
+      </div>
+      <div class="fn">
+        <code>deputy_sheet</code>
+        <p>把缓冲里「值得看」的帧压成一张 4×4 联系表推进会话，一次只花一张图的额度，帧序号直接烧进图像里。</p>
+      </div>
+      <div class="fn">
+        <code>deputy_desktop</code>
+        <p>开会话、拉程序、取窗口树、关桌面。状态机只有 idle → opened → running → closed 四态，关掉是幂等的。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="slot">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>嵌在 DSH 界面里<br>那块能点的虚拟桌面</h2>
+      <p>
+        左侧导航（插件 / 自动化任务 / 上下文洞察 / 学习 / 更多）不是公开插槽，三方插件塞不进去。
+        插件能用的席位是壳层浮层、右侧详情位、左栏底部动作位、右侧文档 tab —— dsh-deputy 选了壳层浮层，
+        官方文档里常态置顶窗口本来就该待在这里。
+      </p>
+    </div>
+
+    <table>
+      <colgroup><col><col><col></colgroup>
+      <thead>
+        <tr><th>插槽</th><th>形态</th><th>为什么这样选</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>shell.overlay<p class="pick">正在使用</p></td>
+          <td>整帧浮层</td>
+          <td><p>可容纳一块持续刷新的画面，位置与尺寸由用户拖动决定；不抢占正文区域，收起后不留痕迹。</p></td>
+        </tr>
+        <tr>
+          <td>details</td><td>右侧单例槽</td>
+          <td><p>一次只能挂一个内容，宽度固定，适合表单与检查清单，不适合随时要看的桌面画面。</p></td>
+        </tr>
+        <tr>
+          <td>sidebar.footer.action</td><td>左栏底部动作位</td>
+          <td><p>只是一个按钮位，点开还得另找地方渲染；留作后续「一键唤起」的入口。</p></td>
+        </tr>
+        <tr>
+          <td>sidebar.right.tab.document</td><td>右侧文档 tab</td>
+          <td><p>会被文档流管理，滚动与缩放都不受插件控制，画面比例容易失真。</p></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="dual" style="margin-top:34px">
+      <div class="panelbox">
+        <h3>面板怎么取画面<span>127.0.0.1:17872</span></h3>
+        <p>插件在宿主里起一个只绑回环地址的 HTTP 数据面，浮窗每 700 ms 拉一次当前帧，点画面就把归一化坐标回传。</p>
+<pre><span class="c"># 只绑回环，不出网</span>
+<span class="a">GET</span>  /api/health      <span class="c">→ 宿主平台与版本</span>
+<span class="a">GET</span>  /api/frame       <span class="c">→ base64 灰度 PNG</span>
+<span class="a">POST</span> /api/open        <span class="c">→ 开隔离桌面</span>
+<span class="a">POST</span> /api/input       <span class="c">→ {op:'click',x,y}</span>
+<span class="a">POST</span> /api/close       <span class="c">→ 收起并回收</span>
+</pre>
+      </div>
+      <div class="panelbox">
+        <h3>点下去的坐标<span>归一化 0..1</span></h3>
+        <p>浮窗把点击位置换算成 0..1 的比例再回传，宿主侧按当前桌面分辨率还原成像素。窗口被拖大拖小，点哪儿还是点哪儿。</p>
+<pre><span class="c">// client.js</span>
+onPointerDown(<span class="t">e</span>) {
+  <span class="t">const</span> r = <span class="t">e</span>.currentTarget.getBoundingClientRect()
+  <span class="t">const</span> x = (<span class="t">e</span>.clientX - r.left) / r.width
+  <span class="t">const</span> y = (<span class="t">e</span>.clientY - r.top)  / r.height
+  <span class="t">await</span> post(<span class="a">'/api/input'</span>, { op:<span class="a">'click'</span>, x, y })
+}
+</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <div class="sec-head">
+      <h2>装上之后<br>你会看到什么</h2>
+      <p>
+        安装走 DSH 的插件页，或者直接给 pnpm 一条指令。装完左下角会多一个「桌面」胶囊：点开是浮窗，
+        没开桌面、已关闭、宿主不是 Windows 三种空态各有各的说明，不会只给你一个转圈。
+      </p>
+    </div>
+
+    <div class="dual">
+      <div class="panelbox">
+        <h3>在 DSH 里装<span>插件页 · 添加</span></h3>
+        <p>输入包名 <code style="font-family:var(--mono);color:var(--teal);font-size:12.5px">dsh-deputy</code>，来源选中国大陆镜像源或 npm 官方源都可以。换版本前先卸载旧版。</p>
+<pre><span class="c"># 官方源</span>
+pnpm add dsh-deputy <span class="a">--registry=https://registry.npmjs.org/</span>
+
+<span class="c"># 国内镜像</span>
+pnpm add dsh-deputy <span class="a">--registry=https://registry.npmmirror.com/</span>
+</pre>
+      </div>
+      <div class="panelbox">
+        <h3>自己验一遍<span>可选</span></h3>
+        <p>仓库里带 21 项测试与插件清单校验，全在本地跑，不需要真的开桌面。</p>
+<pre>git clone https://github.com/bgsgp/dsh-deputy
+<span class="t">cd</span> dsh-deputy
+node test/run-tests.mjs      <span class="c"># 21 项</span>
+node scripts/check-plugin.mjs <span class="c"># 清单校验</span>
+node scripts/publish-npm.mjs  <span class="c"># dry-run 看会发什么</span>
+</pre>
+      </div>
+    </div>
+
+    <div style="margin-top:34px">
+      <h3 style="font-size:16px;font-weight:500;margin:0 0 6px">已知边界</h3>
+      <ul class="limits">
+        <li><b>真画面只有 Windows 有。</b>非 win32 宿主上工具仍会注册，面板会明确写「宿主不是 Windows」，而不是假装能采帧。</li>
+        <li><b>开隔离桌面要管理员。</b>CreateDesktopW 与 SetThreadDesktop 权限不足时插件直接报错，不会悄悄降级到你的主桌面。</li>
+        <li><b>输入目前只有 click 与 type。</b>拖拽、滚轮、组合键还没进协议。</li>
+        <li><b>面板是 700 ms 采样，不是视频流。</b>快速动画会看起来一顿一顿，这是刻意的——它要的是「变没变」，不是「多流畅」。</li>
+        <li><b>客户端契约还在 rc 阶段。</b>DSH 的插槽 API 还会变，浮窗加载失败时先看宿主版本，再看 CSP 是否允许访问 127.0.0.1。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <div class="sig">
+        <b>沐璃-Zero</b> · 丐帮集团第五院　×　<b>鬼狗子-Zero</b> · 丐帮集团第一院<br>
+        独立实现，未复制上游源码 · MIT · 版本号形如 主.本版.本次提交.总提交
+      </div>
+      <div class="footlinks">
+        <a href="https://github.com/bgsgp/dsh-deputy">仓库</a>
+        <a href="https://www.npmjs.com/package/dsh-deputy">npm</a>
+        <a href="https://github.com/bgsgp/dsh-deputy/tree/main/docs">docs</a>
+        <a href="https://github.com/bgsgp/dsh-deputy/blob/main/CHANGELOG.md">changelog</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<script>
+document.querySelectorAll('.copy').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var el = document.getElementById(btn.dataset.copy);
+    if (!el) return;
+    var text = el.textContent.trim();
+    var done = function () {
+      btn.textContent = '已复制';
+      btn.dataset.done = '1';
+      setTimeout(function () { btn.textContent = '复制'; delete btn.dataset.done; }, 1600);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, function () { fallback(text, done) });
+    } else {
+      fallback(text, done);
+    }
+  });
+});
+function fallback(text, done) {
+  var ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) {}
+  document.body.removeChild(ta);
+}
+
+(function () {
+  var grid = document.getElementById('sheetGrid');
+  if (!grid) return;
+  var lum = [32, 34, 36, 35, 38, 44, 58, 41, 39, 42, 71, 40, 37, 36, 35, 33];
+  var html = '';
+  for (var i = 0; i < 16; i++) {
+    var v = lum[i];
+    var bg = 'rgb(' + v + ',' + Math.round(v * 1.12) + ',' + Math.round(v * 1.18) + ')';
+    html += '<i style="background:' + bg + '"></i>';
+  }
+  grid.innerHTML = html;
+})();
+
+(function () {
+  var range = document.getElementById('scoreRange');
+  var out = document.getElementById('scoreVal');
+  var tierOut = document.getElementById('tierVal');
+  var note = document.getElementById('probeNote');
+  var bands = document.getElementById('bands').children;
+  if (!range) return;
+
+  var TIERS = [
+    { name: 'still',      color: '#8CA1A8', text: '<b>still</b> · 基本没动。返回文字分数即可，不必看图，也不必动作。' },
+    { name: 'minor',      color: '#46D3B4', text: '<b>minor</b> · 有动静但不大，可能是光标闪烁或时钟跳秒。继续等，或直接复采确认。' },
+    { name: 'meaningful', color: '#E8B04B', text: '<b>meaningful</b> · 界面确实变了，通常意味着上一步动作生效。该看清结果再决定下一步。' },
+    { name: 'major',      color: '#E2603F', text: '<b>major</b> · 整片区域都换了，可能是弹窗、切页或崩溃。先看清楚发生了什么，再动作。' }
+  ];
+
+  function tierFor(score) {
+    if (score < 0.05) return 0;
+    if (score < 0.18) return 1;
+    if (score < 0.42) return 2;
+    return 3;
+  }
+
+  function render() {
+    var score = Number(range.value) / 1000;
+    var idx = tierFor(score);
+    var t = TIERS[idx];
+    out.textContent = score.toFixed(3);
+    tierOut.textContent = 'tier · ' + t.name;
+    tierOut.style.color = t.color;
+    for (var i = 0; i < bands.length; i++) {
+      if (i === idx) bands[i].classList.add('on');
+      else bands[i].classList.remove('on');
+    }
+    note.innerHTML = t.text;
+  }
+
+  range.addEventListener('input', render);
+  render();
+})();
+</script>
+</body>
+</html>
