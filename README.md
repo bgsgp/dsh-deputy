@@ -11,15 +11,19 @@
 | **署名** | **鬼狗子-Zero**（立项 / 需求 / 审阅 · **第一院**） |
 | **发布** | [@bgsgp](https://github.com/bgsgp) |
 | **协议** | MIT |
-| **版本** | `0.0.11.11`（主版本.本版本.本版本提交数.总提交数） |
+| **版本** | 四段式（主.本.本次.总），以 `package.json` 为准 |
 
 ---
 
 ## 安装
 
 ```powershell
+# 从 GitHub（不需 npm 登录）
 dsh plugin --profile web add github:bgsgp/dsh-deputy
-dsh plugin --profile web list
+
+# 或 npm 发布后
+npm i -g dsh-deputy
+dsh plugin --profile web add dsh-deputy
 ```
 
 环境要求：Windows x86_64、Node ≥ 20、管理员权限（虚拟桌面必需）。依赖数为 **0**，
@@ -90,6 +94,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ```bash
 node test/run-tests.mjs        # 21 项自检：打分 / 拼图 / ROI / 预算 / 闭环 / 桌面状态机
 node scripts/check-plugin.mjs  # 插件注册自检：版本四段式、入口、工具对齐、权限声明
+node scripts/publish-npm.mjs   # npm 发布 dry-run（四段 → 三段映射）
 
 DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 ```
@@ -118,6 +123,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `scripts/windows-desktop.ps1` | 🟡 原型 | 常驻宿主：建桌面 / 启动 / BitBlt / 取树 / SendInput，**未真机回归** |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 注册一致性自检 |
+| `scripts/publish-npm.mjs` | ✅ 可用（dry-run 通过） | 四段→三段 semver 映射 + 舞台打包 |
 | `cordis.patch.yml` | ✅ 已对齐社区格式 | `- insert: - id/name/config` |
 | MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
 | DSH 原生装载 | 🟡 待真机联调 | 依赖宿主 `tools` / `attachments` 实际签名 |
@@ -162,27 +168,31 @@ scripts/
   windows-uia.ps1      一次性 UIA（无隔离桌面，验证用）
   windows-session.ps1  早期碎片版（留作对照）
   check-plugin.mjs     注册一致性自检
+  publish-npm.mjs      四段版本 → npm 三段映射发布
 docs/
   DESIGN.md       总体思路与六个关键决策
   SENSING.md      打分公式、拼图成本模型、预算曲线
   ACTING.md       动作梯度、selector、三分处置、危险闸门
   ISOLATION.md    桌面隔离原理、为什么要 UAC、与 DSH 文件沙箱的区别
   DESKTOP.md      虚拟桌面执行层：常驻宿主、硬性约束、与豆包式方案的差距
-  INSTALL.md      安装方式、五步验证、UAC 与商城上架
+  INSTALL.md      安装方式、npm 发布、五步验证、UAC 与商城上架
   ROADMAP.md      版本计划
 ```
 
 ## 版本号规则
 
-`主版本.本版本.本版本提交数.总提交数`。`0.0.11.11` 表示"主版本 0、本版本 0、
-本版本内第 11 次提交、仓库累计第 11 次提交"。改版本时 `package.json` 与
-`dsh.plugin.json` 必须同步，`npm run plugin:check` 会报不一致。
+`主版本.本版本.本版本提交数.总提交数`。例：`0.0.15.15` 表示"主版本 0、本版本 0、
+本版本内第 15 次提交、仓库累计第 15 次提交"。
+
+- 仓库内（`package.json`、`dsh.plugin.json`）用四段式；
+- npm 只认三段，**发布时**由 `scripts/publish-npm.mjs` 映射为 `主.本.总提交数`（例：`0.0.15.15` → `0.0.15`），原值写进包的 `deputyVersion` 字段；
+- `npm run plugin:check` 校验四段式格式与两份清单一致。
 
 ## 致谢与许可
 
 设计上参考了两个上游项目（**代码为独立实现，未直接复制源码**）：
 
-- [Yu-tao-Li/dsh-computer-use-win](https://github.com/Yu-tao-Li/dsh-computer-use-win) —— MCP + PowerShell UIA 后端的组织方式，以及 bundle patch 的真实写法
+- [Yu-tao-Li/dsh-computer-use-win](https://github.com/Yu-tao-Li/dsh-computer-use-win) —— MCP + PowerShell UIA 后端的组织方式，以及 bundle patch 的真实写法、npm 发布流程
 - [SAOS-3624/dsh-see-now](https://github.com/SAOS-3624/dsh-see-now) —— 变化挑帧 + 4×4 拼图进会话的做法
 
 详见 [NOTICE](NOTICE)。本仓库以 **MIT** 发布。

@@ -2,49 +2,22 @@
   "name": "dsh-deputy",
   "id": "dsh-deputy",
   "description": "Change-scored desktop sensing (4x4 contact sheet) + a real isolated Windows desktop you can actually operate in.",
-  "version": "0.0.14.14",
+  "version": "0.0.15.15",
   "entry": {
     "name": "dsh-deputy",
     "main": "src/index.mjs",
-    "inject": [
-      "sessionController",
-      "tools",
-      "attachments"
-    ]
+    "inject": ["sessionController", "tools", "attachments"]
   },
-  "platforms": [
-    "win32"
-  ],
+  "platforms": ["win32"],
   "provides": {
-    "tools": [
-      "deputy_sense",
-      "deputy_act",
-      "deputy_sheet",
-      "deputy_desktop"
-    ],
-    "services": [
-      "desktopSession"
-    ]
+    "tools": ["deputy_sense", "deputy_act", "deputy_sheet", "deputy_desktop"],
+    "services": ["desktopSession"]
   },
   "permissions": {
-    "admin": {
-      "required": true,
-      "reason": "CreateDesktopW(GENERIC_ALL) 与 SetThreadDesktop 需要管理员权限；不足时插件显式报错，不降级到主桌面"
-    },
-    "screen": {
-      "required": true,
-      "reason": "BitBlt 采集隔离桌面画面"
-    },
-    "input": {
-      "required": true,
-      "reason": "SendInput 在隔离桌面内模拟键鼠"
-    },
-    "process": {
-      "required": true,
-      "reason": "在隔离桌面内 CreateProcess 启动目标程序"
-    }
+    "admin": {"required": true, "reason": "CreateDesktopW(GENERIC_ALL) 与 SetThreadDesktop 需要管理员权限；不足时插件显式报错，不降级到主桌面"},
+    "screen": {"required": true, "reason": "BitBlt 采集隔离桌面画面"},
+    "input": {"required": true, "reason": "SendInput 在隔离桌面内模拟键鼠"},
+    "process": {"required": true, "reason": "在隔离桌面内 CreateProcess 启动目标程序"}
   },
-  "lifecycle": {
-    "onDispose": "close-desktop"
-  }
+  "lifecycle": {"onDispose": "close-desktop"}
 }

@@ -1,23 +1,11 @@
 {
   "name": "dsh-deputy",
-  "version": "0.0.14.14",
+  "version": "0.0.15.15",
   "description": "DSH deputy: change-scored desktop sensing packed into 4x4 contact sheets, plus a real isolated Windows desktop you can actually operate in.",
   "type": "module",
   "main": "src/index.mjs",
-  "bin": {
-    "deputy-mcp": "src/mcp/server.mjs"
-  },
-  "files": [
-    "src/",
-    "scripts/",
-    "docs/",
-    "cordis.patch.yml",
-    "dsh.plugin.json",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE",
-    "NOTICE"
-  ],
+  "bin": {"deputy-mcp": "src/mcp/server.mjs"},
+  "files": ["src/", "scripts/", "docs/", "cordis.patch.yml", "dsh.plugin.json", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE"],
   "exports": {
     ".": "./src/index.mjs",
     "./desktop": "./src/desktop.mjs",
@@ -37,34 +25,13 @@
   },
   "dsh": {
     "plugin": "./dsh.plugin.json",
-    "bundle": {
-      "patch": "./cordis.patch.yml"
-    },
-    "client": {
-      "platform": "web"
-    }
+    "bundle": {"patch": "./cordis.patch.yml"},
+    "client": {"platform": "web"}
   },
-  "keywords": [
-    "deepseek-harness",
-    "dsh",
-    "dsh-plugin",
-    "computer-use",
-    "virtual-desktop",
-    "windows",
-    "ui-automation",
-    "desktop-automation",
-    "mcp",
-    "contact-sheet"
-  ],
+  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "computer-use", "virtual-desktop", "windows", "ui-automation", "desktop-automation", "mcp", "contact-sheet"],
   "author": "沐璃-Zero",
-  "contributors": [
-    "鬼狗子-Zero"
-  ],
+  "contributors": ["鬼狗子-Zero"],
   "license": "MIT",
-  "engines": {
-    "node": ">=20"
-  },
-  "os": [
-    "win32"
-  ]
+  "engines": {"node": ">=20"},
+  "os": ["win32"]
 }
