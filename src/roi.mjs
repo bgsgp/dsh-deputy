@@ -51,9 +51,13 @@ export function verifyAction(before, after, width, height, roi, policy = {}) {
   const roiAfter = cropGray(after, width, roi)
   const inside = meanAbsDiff(roiBefore, roiAfter)
   const full = meanAbsDiff(before, after)
-  const outside = full > inside
-    ? Math.max(0, (full * before.length - inside * roiBefore.length) / Math.max(1, before.length - roiBefore.length))
-    : 0
+  // full 是整屏加权平均，可能小于 inside；不能用 full > inside 当副作用闸门。
+  // 例：ROI 占半屏、内部全变、外部也变 20% 时 full≈0.6 < inside=1，
+  // 旧写法会把 outside 错记为 0。直接按像素数从整屏差里扣除 ROI 即可。
+  const outside = Math.max(
+    0,
+    (full * before.length - inside * roiBefore.length) / Math.max(1, before.length - roiBefore.length),
+  )
   const verdict = inside < expect ? 'no-effect' : outside > tolerate ? 'side-effect' : 'ok'
   return { inside: Number(inside.toFixed(4)), outside: Number(outside.toFixed(4)), verdict, roi }
 }

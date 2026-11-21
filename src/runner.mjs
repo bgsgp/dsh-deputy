@@ -55,7 +55,19 @@ export function createDeputy({ sensor, actuator, onEvidence, budget = new Budget
       prev = f
       return { first: true, tier: 'major', score: 1 }
     }
-    const s = scoreFrame(prev.gray, f.gray, f.width, f.height, cfg.sense)
+    const resized = prev.width !== f.width || prev.height !== f.height || prev.gray.length !== f.gray.length
+    const s = resized
+      ? {
+          score: 1,
+          tier: 'major',
+          hashDistance: (cfg.sense.hashW - 1) * cfg.sense.hashH,
+          ratio: 1,
+          magnitude: 1,
+          box: { x: 0, y: 0, w: f.width, h: f.height },
+          cells: [],
+          frameChanged: true,
+        }
+      : scoreFrame(prev.gray, f.gray, f.width, f.height, cfg.sense)
     const deg = budget.degradation()
     if (deg.captureRatio < 1 && s.tier !== 'major') {
       prev = f
@@ -105,10 +117,13 @@ export function createDeputy({ sensor, actuator, onEvidence, budget = new Budget
    */
   async function step(a) {
     if (!budget.canStep()) return { ok: false, verdict: 'halt', retries: 0, error: '步数或时间预算用尽' }
-    const before = prev ?? (await grab())
     let retries = 0
     let result
     while (true) {
+      // 每次尝试都取动作前的即时基线：prev 可能是很早以前的观察帧，
+      // 重试时也必须更新基线，否则会把第一次尝试造成的变化算到后一次头上。
+      const before = await grab()
+      prev = before
       try {
         await actuator.perform(a)
       } catch (err) {
@@ -123,11 +138,16 @@ export function createDeputy({ sensor, actuator, onEvidence, budget = new Budget
       if (cfg.settleMs) await sleep(cfg.settleMs)
       const after = await grab()
       const roi = roiForAction(a, { width: after.width, height: after.height, lastBox })
+      prev = after
+      if (before.width !== after.width || before.height !== after.height || before.gray.length !== after.gray.length) {
+        // 窗口切换/缩放后两块像素缓冲不能逐点比较。尺寸变化本身就是明确的画面效果，
+        // 标出来交给上层判断，而不是用新宽度去索引旧缓冲区。
+        return { ok: true, verdict: 'ok', frameChanged: true, inside: 1, outside: 0, retries, roi }
+      }
       result = verifyAction(before.gray, after.gray, after.width, after.height, roi, {
         expect: a.verify?.expect ?? cfg.roi.expect ?? 0.02,
         outsideRatioLimit: cfg.roi.outsideRatioLimit,
       })
-      prev = after
       if (result.verdict === 'ok') return { ok: true, ...result, retries }
       if (result.verdict === 'no-effect' && budget.allowRetry(a.id ?? 'anon')) {
         retries++

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SCRIPTS = path.resolve(HERE, '..', 'scripts')
+const POWERSHELL = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 
 export class DesktopError extends Error {
   constructor(message, code) {
@@ -15,6 +16,26 @@ export class DesktopError extends Error {
     this.name = 'DesktopError'
     this.code = code
   }
+}
+
+/** 按 CommandLineToArgvW 的规则序列化一个 Windows 进程参数。 */
+export function quoteWindowsArg(value) {
+  const arg = String(value)
+  if (arg && !/[\s"]/u.test(arg)) return arg
+  let out = '"'
+  let slashes = 0
+  for (const ch of arg) {
+    if (ch === '\\') {
+      slashes++
+    } else if (ch === '"') {
+      out += '\\'.repeat(slashes * 2 + 1) + '"'
+      slashes = 0
+    } else {
+      out += '\\'.repeat(slashes) + ch
+      slashes = 0
+    }
+  }
+  return out + '\\'.repeat(slashes * 2) + '"'
 }
 
 /** 常驻宿主：一行 JSON 一条命令，一行 JSON 一条回执。 */
@@ -35,7 +56,7 @@ export function createHostTransport({ script = path.join(SCRIPTS, 'windows-deskt
     if (child) return Promise.reject(new DesktopError('宿主已经启动', 'EHOSTRUNNING'))
 
     const proc = spawn(
-      'powershell.exe',
+      POWERSHELL,
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Op', 'host', '-Name', name],
       { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
     )
@@ -170,6 +191,8 @@ export class DesktopSession {
     this.lastError = null
     this.captureWidth = captureWidth
     this.captureHeight = captureHeight
+    // 当前帧是被捕获窗口的局部画面；点击时要平移回桌面的绝对坐标。
+    this.frameOrigin = { x: 0, y: 0 }
     this._opening = null
     this._closing = null
   }
@@ -186,7 +209,10 @@ export class DesktopSession {
     if (this.state !== 'idle') throw new DesktopError(`open 只能在 idle 时调用，当前 ${this.state}`, 'ESTATE')
     const opening = (async () => {
       try {
-        await this.transport.start(this.name)
+        const opened = await this.transport.start(this.name)
+        if (opened?.attached === false) {
+          throw new DesktopError(`宿主未能附着到隔离桌面（Win32 ${opened.attachErr ?? 'unknown'}）`, 'EATTACH')
+        }
         this.state = 'opened'
         this.lastError = null
         return this
@@ -211,7 +237,9 @@ export class DesktopSession {
     if (!Array.isArray(args) || args.some((v) => typeof v !== 'string')) {
       throw new DesktopError('args 必须是字符串数组', 'EARGS')
     }
-    const r = await this.transport.request({ op: 'launch', exe: exe.trim(), args: args.join(' '), desktop: this.name })
+    // 不能 args.join(' ')：含空格、引号或尾部反斜杠的参数会被 CreateProcessW 拆错。
+    const commandLine = args.map(quoteWindowsArg).join(' ')
+    const r = await this.transport.request({ op: 'launch', exe: exe.trim(), args: commandLine, desktop: this.name })
     this.pid = r.pid ?? this.pid
     this.state = 'running'
     return r
@@ -222,14 +250,21 @@ export class DesktopSession {
     const r = await this.transport.request({ op: 'capture', desktop: this.name, region: region ?? null })
     const width = r.width ?? this.captureWidth
     const height = r.height ?? this.captureHeight
-    if (typeof r.grayBase64 !== 'string' || !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    const originX = r.originX ?? 0
+    const originY = r.originY ?? 0
+    if (
+      typeof r.grayBase64 !== 'string' ||
+      !Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0 ||
+      !Number.isInteger(originX) || !Number.isInteger(originY)
+    ) {
       throw new DesktopError('宿主返回了非法帧数据', 'EFRAME')
     }
     const gray = Uint8Array.from(Buffer.from(r.grayBase64, 'base64'))
     if (gray.length !== width * height) {
       throw new DesktopError(`帧字节数不匹配：${gray.length} != ${width * height}`, 'EFRAME')
     }
-    return { gray, width, height }
+    this.frameOrigin = { x: originX, y: originY }
+    return { gray, width, height, originX, originY }
   }
 
   async tree(depth = 4) {
@@ -239,7 +274,21 @@ export class DesktopSession {
 
   async input(input) {
     this.assertActive('input')
-    return this.transport.request({ op: 'input', input, desktop: this.name })
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new DesktopError('input 必须是对象', 'EARGS')
+    }
+    const payload = { ...input }
+    if (payload.op === 'click') {
+      if (!Number.isFinite(payload.x) || !Number.isFinite(payload.y)) {
+        throw new DesktopError('click 需要有限的数值坐标', 'EARGS')
+      }
+      // 对外坐标始终相对当前捕获帧；宿主需要桌面绝对坐标。
+      payload.x = Math.round(payload.x) + this.frameOrigin.x
+      payload.y = Math.round(payload.y) + this.frameOrigin.y
+    } else if (payload.op === 'type' && typeof payload.text !== 'string') {
+      throw new DesktopError('type 需要字符串 text', 'EARGS')
+    }
+    return this.transport.request({ op: 'input', input: payload, desktop: this.name })
   }
 
   /** 幂等关闭；并发 close 共享同一个 Promise，不重复终止宿主。 */
@@ -276,10 +325,17 @@ export class DesktopSession {
     }
   }
 
-  /** 权限不足时显式报错；并发 ensureOpen 只创建一个桌面。 */
+  /** 权限不足时显式报错；并发 ensureOpen 只创建一个桌面；收起后允许重开。 */
   async ensureOpen() {
     if (this.state === 'opened' || this.state === 'running') return this
-    if (this.state === 'closed') throw new DesktopError('会话已关闭，不能重新打开同一会话', 'ECLOSED')
+    if (this.state === 'closed') {
+      // close 会销毁旧 Desktop，但 transport 本身可以重新 spawn。
+      // 面板是长期存活的，不能因为用户点过一次“收起”就只能重启插件。
+      this.state = 'idle'
+      this.pid = null
+      this.lastError = null
+      this.frameOrigin = { x: 0, y: 0 }
+    }
     return this.open()
   }
 }

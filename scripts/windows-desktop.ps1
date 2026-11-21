@@ -32,7 +32,7 @@ using System.Threading;
 namespace Deputy {
 
 public class Desk2 {
-    public static int CapWidth, CapHeight;
+    public static int CapWidth, CapHeight, CapX, CapY;
     public static string LaunchNote = "";
 
     // 关键：主线程（PowerShell 控制台）已经创建过窗口，SetThreadDesktop 会报 ERROR_BUSY(170)。
@@ -50,6 +50,43 @@ public class Desk2 {
         t.Start();
         t.Join();
         if (err != null) throw err;
+    }
+
+    public static void Attach(IntPtr desk) {
+        // 不切换 PowerShell 主线程：它可能已经有窗口，SetThreadDesktop 会 ERROR_BUSY。
+        // 在一个干净 STA 线程里验证附着，后续 UIA 也走同样的 OnDesktop 路径。
+        OnDesktop(desk, delegate() {
+            if (GetThreadDesktop(GetCurrentThreadId()) != desk)
+                throw new InvalidOperationException("线程未能附着到隔离桌面");
+        });
+    }
+
+    public static void UiaOn(IntPtr desk, int[] path, string op, string text) {
+        OnDesktop(desk, delegate() {
+            System.Windows.Automation.AutomationElement el = System.Windows.Automation.AutomationElement.RootElement;
+            var walker = System.Windows.Automation.TreeWalker.ControlViewWalker;
+            if (path != null) {
+                foreach (int idx in path) {
+                    var child = walker.GetFirstChild(el);
+                    for (int i = 0; i < idx && child != null; i++) child = walker.GetNextSibling(child);
+                    if (child == null) throw new InvalidOperationException("UIA path 索引 " + idx + " 无子节点");
+                    el = child;
+                }
+            }
+            if (op == "invoke") {
+                var pattern = el.GetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern)
+                    as System.Windows.Automation.InvokePattern;
+                if (pattern == null) throw new InvalidOperationException("目标控件不支持 InvokePattern");
+                pattern.Invoke();
+            } else if (op == "setValue") {
+                var pattern = el.GetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern)
+                    as System.Windows.Automation.ValuePattern;
+                if (pattern == null) throw new InvalidOperationException("目标控件不支持 ValuePattern");
+                pattern.SetValue(text ?? "");
+            } else {
+                throw new ArgumentException("不支持的 uia.op " + op);
+            }
+        });
     }
 
     public static byte[] Capture(IntPtr desk, int w, int h) {
@@ -183,7 +220,7 @@ public class Desk2 {
                 DeleteDC(memDc);
                 ReleaseDC(IntPtr.Zero, screenDc);
             }
-            CapWidth = w; CapHeight = h;
+            CapWidth = w; CapHeight = h; CapX = wr.Left; CapY = wr.Top;
         });
         return gray;
     }
@@ -211,8 +248,9 @@ public class Desk2 {
         return report;
     }
 
-    public static void ClickOn(IntPtr desk, int x, int y, bool right) { OnDesktop(desk, delegate() { Click(x, y, right); }); }
+    public static void ClickOn(IntPtr desk, int x, int y, bool right, int clicks) { OnDesktop(desk, delegate() { Click(x, y, right, clicks); }); }
     public static void TypeOn(IntPtr desk, string text) { OnDesktop(desk, delegate() { TypeText(text); }); }
+    public static void KeyOn(IntPtr desk, string combo) { OnDesktop(desk, delegate() { KeyCombo(combo); }); }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct STARTUPINFO {
         public int cb;
@@ -243,7 +281,7 @@ public class Desk2 {
     [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr hwnd, IntPtr hdc);
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int cbSize);
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetCursorPos(int x, int y);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int w, int h);
     [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
@@ -253,6 +291,7 @@ public class Desk2 {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern bool CreateProcessW(string app, string cmd, IntPtr pa, IntPtr ta, bool inherit,
         int flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool CloseHandle(IntPtr h);
 
     public const int GENERIC_ALL = 0x10000000;
     public const int CREATE_NEW_CONSOLE = 0x00000010;
@@ -280,23 +319,95 @@ public class Desk2 {
         if (!CreateProcessW(exe, "\"" + exe + "\" " + args, IntPtr.Zero, IntPtr.Zero, false,
             CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out pi))
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        return pi.dwProcessId;
+        try {
+            return pi.dwProcessId;
+        } finally {
+            // CreateProcessW 的进程/线程句柄都由调用者所有；只保留 pid 时必须立即关闭。
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        }
     }
 
-    public static void Click(int x, int y, bool right) {
-        SetCursorPos(x, y);
-        INPUT[] bi = new INPUT[2];
-        bi[0].type = INPUT_MOUSE; bi[0].mi.dwFlags = right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
-        bi[1].type = INPUT_MOUSE; bi[1].mi.dwFlags = right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
-        SendInput(2, bi, Marshal.SizeOf(typeof(INPUT)));
+    private static void SendChecked(INPUT[] inputs) {
+        uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+        if (sent != (uint)inputs.Length)
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(),
+                "SendInput 只接受了 " + sent + "/" + inputs.Length + " 个输入事件");
+    }
+
+    public static void Click(int x, int y, bool right, int clicks) {
+        if (!SetCursorPos(x, y)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        var events = new System.Collections.Generic.List<INPUT>();
+        int count = Math.Max(1, Math.Min(3, clicks));
+        for (int i = 0; i < count; i++) {
+            INPUT down = new INPUT();
+            down.type = INPUT_MOUSE;
+            down.mi.dwFlags = right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
+            INPUT up = new INPUT();
+            up.type = INPUT_MOUSE;
+            up.mi.dwFlags = right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
+            events.Add(down); events.Add(up);
+        }
+        SendChecked(events.ToArray());
+    }
+
+    private static INPUT KeyInput(ushort vk, bool up) {
+        INPUT input = new INPUT();
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = (short)vk;
+        input.ki.dwFlags = up ? KEYEVENTF_KEYUP : 0;
+        return input;
+    }
+
+    private static ushort KeyCode(string value) {
+        string key = (value ?? "").Trim();
+        switch (key.ToLowerInvariant()) {
+            case "ctrl": case "control": return 0x11;
+            case "alt": return 0x12;
+            case "shift": return 0x10;
+            case "win": case "lwin": return 0x5B;
+            case "rwin": return 0x5C;
+            case "enter": case "return": return 0x0D;
+            case "esc": case "escape": return 0x1B;
+            case "tab": return 0x09;
+            case "space": return 0x20;
+            case "backspace": return 0x08;
+            case "delete": case "del": return 0x2E;
+            case "insert": case "ins": return 0x2D;
+            case "home": return 0x24;
+            case "end": return 0x23;
+            case "pageup": return 0x21;
+            case "pagedown": return 0x22;
+            case "left": return 0x25;
+            case "up": return 0x26;
+            case "right": return 0x27;
+            case "down": return 0x28;
+        }
+        if (key.Length == 1) return (ushort)char.ToUpperInvariant(key[0]);
+        int fn;
+        if (key.Length > 1 && key[0] == 'F' && int.TryParse(key.Substring(1), out fn) && fn >= 1 && fn <= 24)
+            return (ushort)(0x70 + fn - 1);
+        throw new ArgumentException("不支持的按键 " + value);
+    }
+
+    public static void KeyCombo(string combo) {
+        string[] parts = (combo ?? "").Split('+');
+        if (parts.Length == 0 || (parts.Length == 1 && parts[0].Trim().Length == 0))
+            throw new ArgumentException("组合键不能为空");
+        var keys = new System.Collections.Generic.List<ushort>();
+        foreach (string part in parts) keys.Add(KeyCode(part));
+        var events = new System.Collections.Generic.List<INPUT>();
+        foreach (ushort key in keys) events.Add(KeyInput(key, false));
+        for (int i = keys.Count - 1; i >= 0; i--) events.Add(KeyInput(keys[i], true));
+        SendChecked(events.ToArray());
     }
 
     public static void TypeText(string text) {
-        foreach (char ch in text) {
+        foreach (char ch in text ?? "") {
             INPUT[] bi = new INPUT[2];
             bi[0].type = INPUT_KEYBOARD; bi[0].ki.wScan = (short)ch; bi[0].ki.dwFlags = KEYEVENTF_UNICODE;
             bi[1].type = INPUT_KEYBOARD; bi[1].ki.wScan = (short)ch; bi[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-            SendInput(2, bi, Marshal.SizeOf(typeof(INPUT)));
+            SendChecked(bi);
         }
     }
 }
@@ -321,9 +432,10 @@ $launched = @()
 
 try {
     $handle = [Deputy.Desk2]::Create($Name)
-    # 关键：在创建任何窗口之前把本线程缠到隔离桌面
-    $attached = [Deputy.Desk2]::SetThreadDesktop($handle)
-    $attachErr = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    # 在干净 STA 线程里验证附着；失败必须终止，绝不能让 UIA 静默落到主桌面。
+    [Deputy.Desk2]::Attach($handle)
+    $attached = $true
+    $attachErr = 0
     Reply @{ id = 0; ok = $true; desktop = $Name; attached = $attached; attachErr = $attachErr; pid = $PID }
 }
 catch {
@@ -356,7 +468,7 @@ try {
                         $bytes = [Deputy.Desk2]::CaptureWindow($handle, $targetPid, $PID)
                         $w = [Deputy.Desk2]::CapWidth
                         $h = [Deputy.Desk2]::CapHeight
-                        Reply @{ id = $req.id; ok = $true; width = $w; height = $h; source = 'window'; pid = $targetPid; grayBase64 = [Convert]::ToBase64String($bytes) }
+                        Reply @{ id = $req.id; ok = $true; width = $w; height = $h; originX = [Deputy.Desk2]::CapX; originY = [Deputy.Desk2]::CapY; source = 'window'; pid = $targetPid; grayBase64 = [Convert]::ToBase64String($bytes) }
                     } catch {
                         # 没有窗口就明确说没有：绝不回退到必然全黑的桌面 BitBlt（那正是侧栏页一片黑的成因）。
                         Reply @{ id = $req.id; ok = $false; code = 'NOWINDOW'; error = '隔离桌面里还没有可捕获的窗口，先启动一个程序'; state = $Name }
@@ -382,28 +494,19 @@ try {
                 }
                 'input' {
                     $in = $req.input
-                    if ($in.op -eq 'click') { [Deputy.Desk2]::ClickOn($handle, [int]$in.x, [int]$in.y, ($in.button -eq 'right')) }
+                    if ($in.op -eq 'click') {
+                        $clicks = 1
+                        if ($null -ne $in.clicks) { $clicks = [Math]::Max(1, [Math]::Min(3, [int]$in.clicks)) }
+                        [Deputy.Desk2]::ClickOn($handle, [int]$in.x, [int]$in.y, ($in.button -eq 'right'), $clicks)
+                    }
                     elseif ($in.op -eq 'type') { [Deputy.Desk2]::TypeOn($handle, [string]$in.text) }
+                    elseif ($in.op -eq 'key') { [Deputy.Desk2]::KeyOn($handle, [string]$in.combo) }
                     else { throw "不支持的 input.op $($in.op)" }
                     Reply @{ id = $req.id; ok = $true }
                 }
                 'uia' {
-                    # 由 JS 侧传 ref path，这里逐级走 ControlViewWalker 定位后执行 pattern
-                    $el = [System.Windows.Automation.AutomationElement]::RootElement
-                    foreach ($idx in $req.payload.ref.path) {
-                        $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
-                        $child = $walker.GetFirstChild($el)
-                        for ($i = 0; $i -lt [int]$idx; $i++) { $child = $walker.GetNextSibling($child) }
-                        if ($null -eq $child) { throw "path 索引 $idx 无子节点" }
-                        $el = $child
-                    }
-                    if ($req.payload.op -eq 'invoke') {
-                        $el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-                    }
-                    elseif ($req.payload.op -eq 'setValue') {
-                        $el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue([string]$req.payload.text)
-                    }
-                    else { throw "不支持的 uia.op $($req.payload.op)" }
+                    # UIA 必须在附着到隔离桌面的干净 STA 线程里执行，不能使用 PowerShell 主线程。
+                    [Deputy.Desk2]::UiaOn($handle, [int[]]$req.payload.ref.path, [string]$req.payload.op, [string]$req.payload.text)
                     Reply @{ id = $req.id; ok = $true }
                 }
                 'close' {

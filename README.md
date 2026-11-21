@@ -94,7 +94,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 35 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器 ref 代数 / 登录态复制 / 状态总线 / HTTP 面板 / 客户端注册
+node test/run-tests.mjs        # 42 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器 ref 代数 / 登录态复制 / 状态总线 / HTTP 面板 / 客户端注册
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 

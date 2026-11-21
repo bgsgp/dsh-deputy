@@ -9,7 +9,7 @@ import { packSheet, labelOf } from '../src/sheet.mjs'
 import { expandBox, verifyAction, cropGray, meanAbsDiff } from '../src/roi.mjs'
 import { Budget } from '../src/budget.mjs'
 import { createDeputy } from '../src/runner.mjs'
-import { DesktopSession, createFakeTransport, sessionSensor, sessionActuator } from '../src/desktop.mjs'
+import { DesktopSession, createFakeTransport, sessionSensor, sessionActuator, quoteWindowsArg } from '../src/desktop.mjs'
 import { createViewer } from '../src/viewer.mjs'
 import { toolSpecs, registerTools, toParameters } from '../src/index.mjs'
 import { setOsStatus, setBrowserStatus, noteFailure, snapshot, resetStatus } from '../src/status.mjs'
@@ -127,6 +127,18 @@ await test('verify：ROI 外的弹窗 → side-effect', () => {
   assert.equal(r.verdict, 'side-effect')
 })
 
+await test('verify：ROI 内变化较大时也不能漏报 ROI 外污染', () => {
+  const after = blank()
+  // 左半屏全变（inside=1），右半屏也变 60/255；full≈0.62 < inside，
+  // 旧的 full > inside 闸门会漏掉这次 side-effect。
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) after[y * W + x] = x < W / 2 ? 0 : 140
+  }
+  const r = verifyAction(blank(), after, W, H, { x: 0, y: 0, w: W / 2, h: H }, { expect: 0.02, outsideRatioLimit: 0.12 })
+  assert.equal(r.verdict, 'side-effect')
+  assert.ok(r.outside > 0.2, `outside=${r.outside}`)
+})
+
 await test('cropGray 与 meanAbsDiff 一致', () => {
   const a = blank()
   const roi = { x: 10, y: 10, w: 20, h: 20 }
@@ -183,6 +195,54 @@ await test('闭环：拼图经 onEvidence 推出且只推一次', async () => {
   await deputy.flush('test')
   assert.equal(shown.length, 1)
   assert.deepEqual([...shown[0].png.subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47])
+})
+
+await test('闭环：帧尺寸变化按 major 处理，不跨尺寸索引旧缓冲', async () => {
+  const frames = [
+    { gray: new Uint8Array(16 * 12).fill(200), width: 16, height: 12 },
+    { gray: new Uint8Array(32 * 24).fill(200), width: 32, height: 24 },
+  ]
+  const deputy = createDeputy({ sensor: { capture: async () => frames.shift() }, actuator: { perform: async () => {} }, policy: { settleMs: 0 } })
+  await deputy.observe()
+  const resized = await deputy.observe()
+  assert.equal(resized.tier, 'major')
+  assert.equal(resized.frameChanged, true)
+  assert.equal(resized.box.w, 32)
+})
+
+await test('闭环：动作导致尺寸变化时明确标记 frameChanged', async () => {
+  const frames = [
+    { gray: new Uint8Array(16 * 12).fill(200), width: 16, height: 12 },
+    { gray: new Uint8Array(32 * 24).fill(200), width: 32, height: 24 },
+  ]
+  const deputy = createDeputy({ sensor: { capture: async () => frames.shift() }, actuator: { perform: async () => {} }, policy: { settleMs: 0 } })
+  const result = await deputy.step({ kind: 'shell', payload: { file: 'app.exe' }, verify: { expect: 0.02 } })
+  assert.equal(result.ok, true)
+  assert.equal(result.frameChanged, true)
+})
+
+await test('闭环：no-effect 重试前重新采动作基线', async () => {
+  let captures = 0
+  let attempts = 0
+  const sensor = {
+    async capture() {
+      captures++
+      const gray = blank()
+      if (captures === 4) paint(gray, { x: 0, y: 0, w: 96, h: 96 }, 20)
+      return { gray, width: W, height: H }
+    },
+  }
+  const deputy = createDeputy({
+    sensor,
+    actuator: { perform: async () => { attempts++ } },
+    budget: new Budget({ maxRetriesPerAction: 1 }),
+    policy: { settleMs: 0 },
+  })
+  const result = await deputy.step({ kind: 'input', payload: { op: 'click', x: 4, y: 4 }, verify: { expect: 0.02 }, id: 'fresh-base' })
+  assert.equal(result.ok, true)
+  assert.equal(result.retries, 1)
+  assert.equal(attempts, 2)
+  assert.equal(captures, 4, '两次尝试都应各自采集 before/after')
 })
 
 await test('虚拟桌面：生命周期 idle→opened→running→closed', async () => {
@@ -256,6 +316,59 @@ await test('虚拟桌面：并发打开只建一个宿主，running 可继续启
   await Promise.all([s.close(), s.close()])
   await assert.rejects(() => s.capture(), (e) => e.code === 'ECLOSED')
   await assert.rejects(() => s.input({ op: 'click', x: 1, y: 1 }), (e) => e.code === 'ECLOSED')
+})
+
+await test('虚拟桌面：关闭后 ensureOpen 能创建全新会话', async () => {
+  const t = createFakeTransport()
+  const s = new DesktopSession({ transport: t })
+  await s.open()
+  await s.close()
+  assert.equal(s.state, 'closed')
+  await s.ensureOpen()
+  assert.equal(s.state, 'opened')
+  assert.equal(t.state.starts, 2)
+  await s.close()
+})
+
+await test('Windows 启动参数按 CommandLineToArgvW 规则转义', async () => {
+  assert.equal(quoteWindowsArg('plain'), 'plain')
+  assert.equal(quoteWindowsArg('a b'), '"a b"')
+  assert.equal(quoteWindowsArg(''), '""')
+  assert.equal(quoteWindowsArg('a"b'), '"a\\"b"')
+  assert.equal(quoteWindowsArg('a b\\'), '"a b\\\\"')
+  const t = createFakeTransport()
+  let launch
+  const request = t.request
+  t.request = async (payload) => {
+    if (payload.op === 'launch') launch = payload
+    return request(payload)
+  }
+  const s = new DesktopSession({ transport: t })
+  await s.open()
+  await s.startApp('C:\\Program Files\\App\\app.exe', ['plain', 'a b', '', 'a"b', 'a b\\'])
+  assert.equal(launch.args, 'plain "a b" "" "a\\"b" "a b\\\\"')
+  await s.close()
+})
+
+await test('窗口帧坐标在 input 时平移为桌面绝对坐标', async () => {
+  const t = createFakeTransport()
+  let clicked
+  const request = t.request
+  t.request = async (payload) => {
+    if (payload.op === 'capture') return { ...(await request(payload)), originX: 100, originY: 50 }
+    if (payload.op === 'input') clicked = payload.input
+    return request(payload)
+  }
+  const s = new DesktopSession({ transport: t })
+  await s.open()
+  const frame = await s.capture()
+  assert.equal(frame.originX, 100)
+  assert.equal(frame.originY, 50)
+  await s.input({ op: 'click', x: 10, y: 20 })
+  assert.equal(clicked.x, 110)
+  assert.equal(clicked.y, 70)
+  await assert.rejects(() => s.input({ op: 'click', x: '10', y: 20 }), (e) => e.code === 'EARGS')
+  await s.close()
 })
 
 await test('工具输出：跳过采样与拼图预算耗尽均符合声明且不抛异常', async () => {

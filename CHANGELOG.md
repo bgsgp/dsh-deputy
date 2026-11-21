@@ -2,6 +2,23 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.38
+
+### 桌面控制真机审计与闭环修复
+- **面板收起后可重开**：`DesktopSession.ensureOpen()` 不再把 `closed` 当成永久终态；
+  旧桌面仍按原规则销毁，重新打开时新建宿主与 Desktop。运行中的 DSH 已复现旧版固定返回
+  `ECLOSED` 的问题，本版补了「open → close → ensureOpen」回归。
+- **窗口局部帧坐标归一**：宿主回传窗口 `originX/originY`，`DesktopSession.input()` 把帧内点击
+  平移为桌面绝对坐标；旧版窗口不在 `(0,0)` 时点击会整体偏移。
+- **Windows 启动参数正确转义**：按 `CommandLineToArgvW` 规则处理空格、空参数、引号和尾部
+  反斜杠，不再直接 `args.join(' ')`；`CreateProcessW` 返回的进程/线程句柄立即关闭。
+- **宿主失败不再静默**：桌面附着改在干净 STA 线程中验证，UIA 也在同一路径执行；
+  PowerShell 使用 `%SystemRoot%` 下的绝对路径，避免精简 PATH 中 `spawn ENOENT`；
+  `SendInput` 校验实际接受的事件数，点击支持 `clicks`，补齐已声明的 `input.op=key` 组合键。
+- **ROI 与帧尺寸修正**：区域外差分直接按像素数扣除 ROI，修掉 `full > inside` 闸门造成的
+  副作用漏报；动作每次尝试前重新采基线；动作/观察前后尺寸变化不再跨尺寸索引旧缓冲区。
+- 自检 **35 → 42 项**，新增关闭重开、参数转义、帧原点、ROI 外部污染、尺寸变化与重试基线覆盖。
+
 ## 1.3.37
 
 ### 修 npm 发布脚本在 Windows 上跑不起来

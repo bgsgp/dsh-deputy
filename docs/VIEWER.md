@@ -93,7 +93,8 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 切到别的页就不再拉帧（组件卸载时清定时器），不会在后台空转。
 
 点击是**归一化坐标**（0..1）：页面被缩放、窗口宽窄变化，命中点不变。宿主协议要像素，
-换算在 `viewer.mjs` 里做（见 `POST /api/input`）。
+换算在 `viewer.mjs` 里做（见 `POST /api/input`）。捕获的是窗口局部帧时，宿主还会回传窗口
+`originX/originY`，由 `DesktopSession.input()` 平移为桌面绝对坐标，避免窗口不在原点时整体点偏。
 
 ## 状态点：一个点代表两个组件
 

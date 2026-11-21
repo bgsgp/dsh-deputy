@@ -122,6 +122,8 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
         png: encodeGrayPng(f.gray, f.width, f.height).toString('base64'),
         width: f.width,
         height: f.height,
+        originX: f.originX ?? 0,
+        originY: f.originY ?? 0,
         ts: Date.now(),
       }
     })()

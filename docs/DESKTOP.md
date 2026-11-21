@@ -47,7 +47,8 @@ close()                ────────► 宿主退出 → 桌面销毁
 ```
 idle ──open()──► opened ──startApp()──► running ──close()──► closed
   ▲                 │                      │                   │
-  └─ 构造            └─ capture/tree/input 都可（不在 idle 时） └─ close 幂等
+  │                 └─ capture/tree/input 都可（不在 idle 时） └─ close 幂等
+  └─ ensureOpen()：closed 后创建全新宿主与 Desktop（旧桌面不会复活）
 ```
 
 越序调用一律抛 `DesktopError(code=ESTATE)`，而不是"帮你猜一个合理行为"。
