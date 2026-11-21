@@ -260,6 +260,75 @@ value.image?.attachmentId ? ok('工具结果带 ImageAttachmentRef 元数据') :
 blocks.some((b) => b.type === 'image') ? ok('render 返回 image content block') : bad('render 未返回 image block')
 sheet?.outputSchema?.properties?.image?.type === 'object' ? ok('deputy_sheet.output.schema 声明 image') : bad('deputy_sheet.output.schema 未声明 image')
 
+// 8b. 一个包两个组件：cordis.patch.yml 必须有两条 insert，exports 子路径可解析
+// （插件管理器里「包含的组件」按 insert 的 name 显示，billion-context 就是这么做的）
+const COMPONENTS = [
+  { id: 'dsh-deputy-os', name: 'dsh-deputy/os', sub: './os', file: 'src/os.mjs' },
+  { id: 'dsh-deputy-browser', name: 'dsh-deputy/browser', sub: './browser', file: 'src/browser.mjs' },
+]
+const patchText = exists(patch) ? readFileSync(path.join(ROOT, patch), 'utf8') : ''
+for (const c of COMPONENTS) {
+  patchText.includes(`id: ${c.id}`) ? ok(`patch 有组件条目 ${c.id}`) : bad(`cordis.patch.yml 缺少 id: ${c.id}`)
+  patchText.includes(`name: '${c.name}'`) ? ok(`patch 组件名 = ${c.name}`) : bad(`cordis.patch.yml 缺少 name: '${c.name}'`)
+  const target = pkg.exports?.[c.sub]
+  target && exists(target) ? ok(`exports["${c.sub}"] = ${target}`) : bad(`exports["${c.sub}"] 未声明或文件不存在`)
+  target === `./${c.file}` ? null : warn(`exports["${c.sub}"] 期望指向 ./ ${c.file}`)
+}
+patchText.match(/^\s*-\s*insert:/gm)?.length === 1 ? ok('patch 只有一条 insert（两个组件放同一条）') : warn('patch 的 insert 条目数量不是 1')
+
+// 8c. 浏览器组件的 5 个工具：同样要过 0.2.2 的 schema 子集与 author 参数表
+const { browserToolSpecs } = await import(pathToFileURL(path.join(ROOT, 'src/browser/tools.mjs')).href)
+const fakeDaemon = {
+  state: 'stopped',
+  status: () => ({ state: 'stopped' }),
+  ensureStarted: async () => ({ state: 'running' }),
+  navigate: async () => ({ ok: true }),
+  observe: async () => ({ ok: true, text: '', refs: [] }),
+  act: async () => ({ ok: true }),
+  close: async () => {},
+}
+const browserSpecs = browserToolSpecs(fakeDaemon, {})
+const browserRegistered = []
+const browserSink = registerTools({ tools: { register: (def) => browserRegistered.push(def) } }, browserSpecs)
+browserSink.length === 0 ? ok(`browser 工具全部注册（${browserRegistered.length} 个）`) : bad(`browser 有 ${browserSink.length} 个工具未注册`)
+const WANT_BROWSER_TOOLS = ['browser_open', 'browser_observe', 'browser_act', 'browser_status', 'browser_close']
+for (const want of WANT_BROWSER_TOOLS) {
+  browserRegistered.some((d) => d.name === want) ? ok(`browser 工具 ${want} 已注册`) : bad(`browser 缺少工具 ${want}`)
+}
+for (const def of browserRegistered) {
+  const schemaViolations = []
+  checkRawSchema(def.output?.schema, `${def.name}.output.schema`, schemaViolations)
+  schemaViolations.length ? bad(`${def.name}: output schema 不合 0.2.2 子集：${schemaViolations.join('；')}`)
+    : ok(`${def.name}: output schema 符合 0.2.2 子集`)
+  const spec = browserSpecs.find((s) => s.name === def.name)
+  const paramViolations = []
+  checkAuthorParams(
+    { type: 'object', additionalProperties: true, properties: spec?.inputSchema?.properties ?? {} },
+    `${def.name}.parameters`,
+    paramViolations,
+  )
+  paramViolations.length ? bad(`${def.name}: 参数表会被真实 dsh-tools 拒绝：${paramViolations.join('；')}`)
+    : ok(`${def.name}: 参数表符合 author 规则`)
+}
+
+// 8d. 状态总线：两个组件各自报状态，合成面板上的那个点
+const status = await import(pathToFileURL(path.join(ROOT, 'src/status.mjs')).href)
+status.resetStatus()
+const idleLevel = status.snapshot().level
+status.setOsStatus({ state: 'opened', running: true })
+const runningLevel = status.snapshot().level
+status.noteFailure('browser', new Error('boom'))
+const errorSnapshot = status.snapshot()
+status.setBrowserStatus({ error: null })
+const clearedLevel = status.snapshot().level
+status.resetStatus()
+idleLevel === 'idle' ? ok('状态总线：初始 level=idle') : bad(`状态总线初始 level 应为 idle，实际 ${idleLevel}`)
+runningLevel === 'running' ? ok('状态总线：os 运行中 level=running') : bad(`运行中 level 应为 running，实际 ${runningLevel}`)
+errorSnapshot.level === 'error' && errorSnapshot.browser.error === 'boom'
+  ? ok('状态总线：任一组件报错 level=error')
+  : bad('状态总线：noteFailure 未把 level 推到 error')
+clearedLevel === 'running' ? ok('状态总线：清错后回到 running') : bad(`清错后 level 应为 running，实际 ${clearedLevel}`)
+
 // 9. 依赖数量仍为 0（只用 Node 内置 + react 单例）
 Object.keys(pkg.dependencies ?? {}).length === 0 ? ok('运行时依赖 0 个') : warn('出现了 dependencies')
 

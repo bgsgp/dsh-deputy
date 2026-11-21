@@ -2,15 +2,39 @@
 //
 // 路由（全部 JSON，全部 cache-control: no-store）：
 //   GET  /api/health          → { ok, platform, state, name, pid }
+//   GET  /api/status          → os + browser 两个组件的合成状态（侧栏状态点读这个）
 //   GET  /api/frame           → { ok, png(base64 灰度 PNG), width, height, ts }
+//                               失败时 ok:false + reason + code（NOWINDOW = 桌面里还没有窗口）
 //   POST /api/open            → 开桌面（Windows 上会弹 UAC）
 //   POST /api/close           → 收桌面
 //   POST /api/launch { exe }  → 在隔离桌面里起程序
+//                    { app: 'edge' | 'notepad' }  → 用内置预设启动（面板按钮走这条）
 //   POST /api/input  { type: 'click', x, y }  x/y 为 0..1 归一化坐标
 //                    { type: 'type', text }
 // input 同时兼容 op 字段；点击会被换算成像素坐标再交给宿主。
 import http from 'node:http'
+import { existsSync } from 'node:fs'
 import { encodeGrayPng } from './png.mjs'
+import { snapshot, setOsStatus, noteFailure } from './status.mjs'
+
+/** 面板里的「启动 xxx」按钮用预设，省得客户端硬编码路径。 */
+const APP_PRESETS = {
+  edge: {
+    candidates: [
+      'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+      'C:/Program Files/Microsoft/Edge/Application/msedge.exe',
+    ],
+    args: ['--no-first-run', '--no-default-browser-check', '--disable-gpu', '--window-size=1440,900', '--new-window', 'about:blank'],
+  },
+  notepad: { candidates: ['C:/Windows/System32/notepad.exe'], args: [] },
+}
+
+function resolveApp(app) {
+  const preset = APP_PRESETS[app]
+  if (!preset) return null
+  const exe = preset.candidates.find((p) => existsSync(p)) ?? preset.candidates[preset.candidates.length - 1]
+  return { exe, args: [...preset.args] }
+}
 
 export const DEFAULT_VIEW_PORT = 17872
 const MAX_BODY_BYTES = 1_000_000
@@ -133,6 +157,17 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
       })
     }
 
+    if (url.pathname === '/api/status') {
+      if (req.method !== 'GET') return methodNotAllowed(res, 'GET')
+      // 桌面这一段的实时状态以 session 为准（进程重启后总线是新的，session 也是新的，二者一致）
+      setOsStatus({
+        state: session.state,
+        running: session.state === 'opened' || session.state === 'running',
+        detail: session.name,
+      })
+      return json(res, 200, { ...snapshot(), platform: process.platform, desktop: { state: session.state, name: session.name, pid: session.pid ?? null } })
+    }
+
     if (url.pathname === '/api/frame') {
       if (req.method !== 'GET') return methodNotAllowed(res, 'GET')
       if (session.state !== 'opened' && session.state !== 'running') {
@@ -146,7 +181,8 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
         const frame = await captureFrame()
         return json(res, 200, { ok: true, ...frame })
       } catch (e) {
-        return json(res, 200, { ok: false, state: session.state, reason: e.message })
+        // code 透传给页面：NOWINDOW 表示桌面里还没有窗口，页面要给"启动程序"的引导而不是一张黑图
+        return json(res, 200, { ok: false, state: session.state, reason: e.message, code: e.code ?? null })
       }
     }
 
@@ -154,9 +190,11 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
       if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
       try {
         await session.ensureOpen()
+        setOsStatus({ state: session.state, running: true, error: null })
         return json(res, 200, { ok: true, state: session.state, name: session.name })
       } catch (e) {
-        return json(res, 200, { ok: false, reason: e.message })
+        noteFailure('os', e)
+        return json(res, 200, { ok: false, reason: e.message, code: e.code ?? null })
       }
     }
 
@@ -165,9 +203,11 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
       try {
         const r = await session.close()
         lastFrame = null
+        setOsStatus({ state: 'closed', running: false, error: null })
         return json(res, 200, { ok: true, ...r })
       } catch (e) {
-        return json(res, 200, { ok: false, reason: e.message })
+        noteFailure('os', e)
+        return json(res, 200, { ok: false, reason: e.message, code: e.code ?? null })
       }
     }
 
@@ -175,16 +215,25 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
       if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
       try {
         const b = await bodyOf(req)
-        if (typeof b.exe !== 'string' || !b.exe.trim()) throw badRequest('launch 需要非空 exe')
-        const args = b.args ?? []
+        let exe = typeof b.exe === 'string' ? b.exe.trim() : ''
+        let args = b.args ?? []
+        if (!exe && b.app) {
+          const preset = resolveApp(String(b.app))
+          if (!preset) throw badRequest(`未知的 app 预设 ${String(b.app)}`)
+          exe = preset.exe
+          if (!Array.isArray(b.args)) args = preset.args
+        }
+        if (!exe) throw badRequest('launch 需要非空 exe（或用 app 预设）')
         if (!Array.isArray(args) || args.some((v) => typeof v !== 'string')) {
           throw badRequest('args 必须是字符串数组')
         }
         await session.ensureOpen()
-        const r = await session.startApp(b.exe.trim(), args)
-        return json(res, 200, { ok: true, ...r })
+        const r = await session.startApp(exe, args)
+        setOsStatus({ state: session.state, running: true, error: null })
+        return json(res, 200, { ok: true, exe, ...r })
       } catch (e) {
-        return json(res, e.statusCode ?? 200, { ok: false, reason: e.message })
+        noteFailure('os', e)
+        return json(res, e.statusCode ?? 200, { ok: false, reason: e.message, code: e.code ?? null })
       }
     }
 

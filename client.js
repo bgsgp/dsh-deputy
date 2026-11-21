@@ -1,5 +1,5 @@
 /**
- * dsh-deputy 浏览器半：把隔离桌面做成 DSH「应用」侧栏里的一页。
+ * dsh-deputy 的客户端半：把隔离桌面做成 DSH「应用」侧栏里的一页，并在那条侧栏行右侧挂一个状态点。
  *
  * 契约（对齐 @deepseek-ai/dsh-client-modules 的 lazy-CJS factory）：
  *  - 本脚本被执行时只做一件事：window.__ModuleLoader__.load({ id, factory })。
@@ -14,6 +14,8 @@
  *    侧栏自己渲染行、管选中和 More 菜单，插件只提供 id/顺序/文字/图标。
  *  - main：keyed 槽，注册项 = { name, key } + 页面组件；key 必须等于侧栏 id。
  *    点侧栏行 → ctx.layout.selectPanel(id) → 中央区切到这一页（本插件不直接调 layout）。
+ *  - 行内没有「尾部插槽」，所以状态点是从图标组件里绝对定位出去的：
+ *    最近的定位祖先是侧栏自己的 .panelEntry(position:relative)，right:7px 就是那一行的右端。
  * 数据面走宿主起的 127.0.0.1:17872，见 src/viewer.mjs。
  */
 window.__ModuleLoader__.load({
@@ -36,7 +38,7 @@ window.__ModuleLoader__.load({
 .ddp-page{display:flex;flex-direction:column;height:100%;min-height:0;font-size:13px;
   background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
 .ddp-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 14px;
-  border-bottom:1px solid var(--dsw-alias-border-l1)}
+  border-bottom:1px solid var(--dsw-alias-border-l1);flex-wrap:wrap}
 .ddp-title{font-weight:600;font-size:14px}
 .ddp-spacer{flex:1}
 .ddp-tag{padding:1px 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);
@@ -51,10 +53,20 @@ window.__ModuleLoader__.load({
   overflow:auto;background:var(--dsw-alias-bg-layer-2)}
 .ddp-img{max-width:100%;max-height:100%;image-rendering:pixelated;cursor:crosshair;
   box-shadow:0 6px 24px rgba(0,0,0,.28)}
-.ddp-empty{max-width:520px;padding:24px;line-height:1.9;text-align:center;opacity:.85}
+.ddp-empty{max-width:560px;padding:24px;line-height:1.9;text-align:center;opacity:.9}
 .ddp-empty b{font-size:15px;display:block;margin-bottom:6px;opacity:1}
+.ddp-empty .ddp-actions{display:flex;gap:8px;justify-content:center;margin-top:14px;flex-wrap:wrap}
 .ddp-foot{flex:none;display:flex;align-items:center;gap:10px;padding:7px 14px;
   border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;opacity:.85}
+/* 侧栏状态点：在图标组件里绝对定位，祖先是侧栏行的 .panelEntry(position:relative) */
+.ddp-dot{position:absolute;right:7px;top:50%;margin-top:-3px;width:6px;height:6px;border-radius:50%;
+  pointer-events:none;transition:background-color .2s ease,opacity .15s ease;
+  box-shadow:0 0 0 2px var(--dsw-alias-bg-layer-1)}
+.ddp-dot[data-level="running"]{background:#22c55e}
+.ddp-dot[data-level="error"]{background:#ef4444}
+.ddp-dot[data-level="idle"]{background:#9ca3af}
+/* 悬停时侧栏会显示 unpin 按钮，点让位 */
+.panelEntry:hover .ddp-dot{opacity:0}
 `
 
     const CSS_ID = 'dsh-deputy/viewer.css'
@@ -82,26 +94,110 @@ window.__ModuleLoader__.load({
       closed: '已收起',
     }
 
+    const BROWSER_TEXT = {
+      stopped: '浏览器未启动',
+      starting: '浏览器启动中',
+      running: '浏览器运行中',
+      paused: '浏览器组件被停用',
+      error: '浏览器出错',
+    }
+
+    const LEVEL_TEXT = { running: '正在运行', error: '出现错误', idle: '未运行' }
+
     /**
-     * 侧栏图标：显示器 + 指针。收 { size, active }，用 currentColor 跟随主题。
+     * 状态点数据源：os + browser 两个组件的合成状态，2s 轮询一次。
+     * 侧栏图标与页面共用同一份订阅，避免一个页面开两套定时器。
+     */
+    const statusStore = {
+      value: { level: 'idle', os: null, browser: null, error: null, at: 0 },
+      subs: new Set(),
+      timer: null,
+      inflight: false,
+    }
+
+    function publishStatus(next) {
+      statusStore.value = next
+      for (const fn of statusStore.subs) {
+        try {
+          fn(next)
+        } catch {
+          /* 单个订阅者出错不影响其它人 */
+        }
+      }
+    }
+
+    async function refreshStatus() {
+      if (statusStore.inflight) return
+      statusStore.inflight = true
+      try {
+        const s = await api('/api/status')
+        publishStatus({ level: s.level || 'idle', os: s.os || null, browser: s.browser || null, error: null, at: s.at || Date.now() })
+      } catch (e) {
+        // 连不上宿主 = 插件没在跑 / 端点没起，按灰点处理，但把原因留着给 title 看
+        publishStatus({ level: 'idle', os: null, browser: null, error: String(e.message || e), at: Date.now() })
+      } finally {
+        statusStore.inflight = false
+      }
+    }
+
+    function subscribeStatus(fn) {
+      statusStore.subs.add(fn)
+      fn(statusStore.value)
+      if (!statusStore.timer) {
+        statusStore.timer = setInterval(refreshStatus, 2000)
+        refreshStatus()
+      }
+      return () => {
+        statusStore.subs.delete(fn)
+        if (statusStore.subs.size === 0 && statusStore.timer) {
+          clearInterval(statusStore.timer)
+          statusStore.timer = null
+        }
+      }
+    }
+
+    /**
+     * 侧栏图标：显示器 + 指针 + 行右端状态点。收 { size, active }，用 currentColor 跟随主题。
      * @param {{size?: number, active?: boolean}} props
      */
     function DeputyIcon(props) {
       const size = props && props.size ? props.size : 18
       const active = Boolean(props && props.active)
+      const [level, setLevel] = useState(statusStore.value.level)
+      const [tip, setTip] = useState('')
+      useEffect(
+        () =>
+          subscribeStatus((s) => {
+            setLevel(s.level || 'idle')
+            const parts = []
+            if (s.os) parts.push('桌面：' + (STATE_TEXT[s.os.state] || s.os.state || '未知'))
+            if (s.browser && s.browser.state && s.browser.state !== 'stopped') {
+              parts.push(BROWSER_TEXT[s.browser.state] || ('浏览器：' + s.browser.state))
+            }
+            const err = (s.os && s.os.error) || (s.browser && s.browser.error) || s.error
+            if (err) parts.push('错误：' + err)
+            setTip((LEVEL_TEXT[s.level] || s.level) + (parts.length ? ' · ' + parts.join(' · ') : ''))
+          }),
+        [],
+      )
       return h(
-        'svg',
-        {
-          width: size,
-          height: size,
-          viewBox: '0 0 24 24',
-          fill: 'none',
-          'aria-hidden': 'true',
-          style: { opacity: active ? 1 : 0.82 },
-        },
-        h('rect', { x: 2.5, y: 3.5, width: 19, height: 13, rx: 2.2, stroke: 'currentColor', strokeWidth: 1.6 }),
-        h('path', { d: 'M8 20.2h8', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
-        h('path', { d: 'M12.6 9.4l5.2 2.1-2.2 1.1-1.1 2.2-1.9-5.4z', fill: 'currentColor' }),
+        'span',
+        { style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } },
+        h(
+          'svg',
+          {
+            width: size,
+            height: size,
+            viewBox: '0 0 24 24',
+            fill: 'none',
+            'aria-hidden': 'true',
+            style: { opacity: active ? 1 : 0.82 },
+          },
+          h('rect', { x: 2.5, y: 3.5, width: 19, height: 13, rx: 2.2, stroke: 'currentColor', strokeWidth: 1.6 }),
+          h('path', { d: 'M8 20.2h8', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
+          h('path', { d: 'M12.6 9.4l5.2 2.1-2.2 1.1-1.1 2.2-1.9-5.4z', fill: 'currentColor' }),
+        ),
+        h('i', { className: 'ddp-dot', 'data-level': level, title: tip, 'aria-label': tip, role: 'img' }),
       )
     }
 
@@ -110,7 +206,9 @@ window.__ModuleLoader__.load({
       const [frame, setFrame] = useState(null)
       const [health, setHealth] = useState(null)
       const [err, setErr] = useState(null)
-      const [opening, setOpening] = useState(false)
+      const [errCode, setErrCode] = useState(null)
+      const [busy, setBusy] = useState(null)
+      const [bus, setBus] = useState(statusStore.value)
       const imgRef = useRef(null)
       const mountedRef = useRef(true)
       const pullingRef = useRef(false)
@@ -125,14 +223,17 @@ window.__ModuleLoader__.load({
           if (f.ok) {
             setFrame(f)
             setErr(null)
+            setErrCode(null)
           } else {
             setFrame(null)
             setErr(f.reason)
+            setErrCode(f.code ?? null)
           }
         } catch (e) {
           if (mountedRef.current) {
             setFrame(null) // 连接断开时不保留可点击的旧画面
             setErr(String(e.message || e))
+            setErrCode(null)
           }
         } finally {
           pullingRef.current = false
@@ -164,10 +265,12 @@ window.__ModuleLoader__.load({
         // 700ms 一帧足够"手动点选"；请求未完成时下一轮直接跳过，不叠加。
         const t1 = setInterval(pull, 700)
         const t2 = setInterval(beat, 2500)
+        const off = subscribeStatus(setBus)
         return () => {
           mountedRef.current = false
           clearInterval(t1)
           clearInterval(t2)
+          off()
         }
       }, [pull, beat])
 
@@ -191,38 +294,46 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const open = async () => {
-        if (opening) return
-        setOpening(true)
-        try {
-          const r = await api('/api/open', { method: 'POST' })
-          if (!mountedRef.current) return
-          if (!r.ok) setErr(r.reason)
-          else setErr(null)
-          await beat()
-          setTimeout(pull, 600)
-        } catch (e) {
-          if (mountedRef.current) setErr(String(e.message || e))
-        } finally {
-          if (mountedRef.current) setOpening(false)
-        }
-      }
+      const post = useCallback(
+        async (path, body, tag) => {
+          if (busy) return null
+          setBusy(tag)
+          try {
+            const r = await api(path, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(body ?? {}),
+            })
+            if (!mountedRef.current) return null
+            if (!r.ok) setErr(r.reason)
+            else setErr(null)
+            await beat()
+            setTimeout(pull, tag === 'launch' ? 1200 : 600)
+            return r
+          } catch (e) {
+            if (mountedRef.current) setErr(String(e.message || e))
+            return null
+          } finally {
+            if (mountedRef.current) setBusy(null)
+          }
+        },
+        [busy, beat, pull],
+      )
 
-      const close = async () => {
-        try {
-          await api('/api/close', { method: 'POST' })
-          if (!mountedRef.current) return
-          setFrame(null)
-          setErr(null)
-          await beat()
-        } catch (e) {
-          if (mountedRef.current) setErr(String(e.message || e))
-        }
+      const open = () => post('/api/open', {}, 'open')
+      const close = () => {
+        setFrame(null)
+        setErr(null)
+        setErrCode(null)
+        return post('/api/close', {}, 'close')
       }
+      const launch = (app) => post('/api/launch', { app }, 'launch')
 
       const state = health && health.state ? health.state : 'unknown'
       const live = Boolean(frame)
       const isWin = !health || health.platform === 'win32'
+      const openState = state === 'opened' || state === 'running'
+      const browserText = bus && bus.browser ? BROWSER_TEXT[bus.browser.state] || bus.browser.state : null
 
       return h(
         'section',
@@ -233,10 +344,13 @@ window.__ModuleLoader__.load({
           h('span', { className: 'ddp-title' }, PANEL_LABEL),
           h('span', { className: 'ddp-tag', 'data-live': live ? '1' : '0' }, STATE_TEXT[state] || state),
           health && health.name ? h('span', { className: 'ddp-tag' }, health.name) : null,
+          browserText ? h('span', { className: 'ddp-tag', 'data-live': bus.browser.state === 'running' ? '1' : '0' }, browserText) : null,
           h('span', { className: 'ddp-spacer' }),
-          h('button', { className: 'ddp-btn', type: 'button', onClick: open, disabled: opening || !isWin, title: '开隔离桌面（Windows 上会弹 UAC）' }, opening ? '打开中…' : '打开桌面'),
+          h('button', { className: 'ddp-btn', type: 'button', onClick: open, disabled: Boolean(busy) || !isWin, title: '开隔离桌面（Windows 上会弹 UAC）' }, busy === 'open' ? '打开中…' : '打开桌面'),
+          h('button', { className: 'ddp-btn', type: 'button', onClick: () => launch('edge'), disabled: Boolean(busy) || !openState, title: '在隔离桌面里启动 Edge' }, busy === 'launch' ? '启动中…' : '启动 Edge'),
+          h('button', { className: 'ddp-btn', type: 'button', onClick: () => launch('notepad'), disabled: Boolean(busy) || !openState, title: '在隔离桌面里启动记事本' }, '记事本'),
           h('button', { className: 'ddp-btn', type: 'button', onClick: pull }, '刷新'),
-          h('button', { className: 'ddp-btn', type: 'button', onClick: close, disabled: state !== 'opened' && state !== 'running' }, '收起桌面'),
+          h('button', { className: 'ddp-btn', type: 'button', onClick: close, disabled: Boolean(busy) || !openState }, '收起桌面'),
         ),
         h(
           'div',
@@ -256,8 +370,24 @@ window.__ModuleLoader__.load({
             : h(
                 'div',
                 { className: 'ddp-empty' },
-                h('b', null, err ? '未拿到画面' : '还没有画面'),
-                h('div', null, err ? err : '点上方「打开桌面」，让宿主在隔离桌面里起一个桌面会话'),
+                h('b', null, errCode === 'NOWINDOW' ? '桌面里还没有窗口' : err ? '未拿到画面' : '还没有画面'),
+                h(
+                  'div',
+                  null,
+                  errCode === 'NOWINDOW'
+                    ? '隔离桌面已经打开了，但里面没有任何程序。启动一个程序就会出画面（隔离桌面没有系统合成，只能逐窗口截图）。'
+                    : err
+                      ? err
+                      : '点上方「打开桌面」，让宿主在隔离桌面里起一个桌面会话',
+                ),
+                errCode === 'NOWINDOW'
+                  ? h(
+                      'div',
+                      { className: 'ddp-actions' },
+                      h('button', { className: 'ddp-btn', type: 'button', onClick: () => launch('edge'), disabled: Boolean(busy) }, busy === 'launch' ? '启动中…' : '启动 Edge'),
+                      h('button', { className: 'ddp-btn', type: 'button', onClick: () => launch('notepad'), disabled: Boolean(busy) }, '启动记事本'),
+                    )
+                  : null,
                 h('div', null, '之后这页每 0.7 秒刷新一次；点画面 = 在隔离桌面里点一下'),
                 !isWin ? h('div', null, '（宿主平台是 ' + health.platform + '，真实桌面只在 Windows 上可用）') : null,
               ),
@@ -267,6 +397,7 @@ window.__ModuleLoader__.load({
           { className: 'ddp-foot' },
           h('span', null, frame ? frame.width + '×' + frame.height : '—'),
           h('span', null, health && health.pid ? 'pid ' + health.pid : '无会话'),
+          h('span', null, bus && bus.browser && bus.browser.state === 'running' ? '浏览器 pid ' + (bus.browser.detail || '—') : ''),
           h('span', { className: 'ddp-spacer' }),
           h('span', null, '所有点击只落在隔离桌面，不碰你当前的主桌面'),
         ),
@@ -299,6 +430,7 @@ window.__ModuleLoader__.load({
     exports.PANEL_LABEL = PANEL_LABEL
     exports.DeputyIcon = DeputyIcon
     exports.DeputyPage = DeputyPage
+    exports.subscribeStatus = subscribeStatus
 
     return module.exports
   },

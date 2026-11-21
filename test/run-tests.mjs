@@ -10,6 +10,9 @@ import { createDeputy } from '../src/runner.mjs'
 import { DesktopSession, createFakeTransport, sessionSensor, sessionActuator } from '../src/desktop.mjs'
 import { createViewer } from '../src/viewer.mjs'
 import { toolSpecs, registerTools, toParameters } from '../src/index.mjs'
+import { setOsStatus, setBrowserStatus, noteFailure, snapshot, resetStatus } from '../src/status.mjs'
+import { browserToolSpecs } from '../src/browser/tools.mjs'
+import { runSteps } from '../src/browser/act.mjs'
 
 const PASS = []
 const FAILED = []
@@ -347,6 +350,95 @@ await test('工具 schema：output 用 required 数组、参数表 object 显式
       assert.equal(typeof node.additionalProperties, 'boolean')
     }
   }
+})
+
+await test('状态总线：两组件合成一个状态点（error > running > idle）', async () => {
+  resetStatus()
+  assert.equal(snapshot().level, 'idle')
+  setOsStatus({ state: 'opened', running: true })
+  assert.equal(snapshot().level, 'running')
+  noteFailure('browser', new Error('boom'))
+  const errored = snapshot()
+  assert.equal(errored.level, 'error')
+  assert.equal(errored.browser.error, 'boom')
+  assert.equal(errored.os.running, true)
+  // 清错后回到运行态：语义是「最近一次错误」，成功路径显式传 error: null
+  setBrowserStatus({ error: null })
+  assert.equal(snapshot().level, 'running')
+  resetStatus()
+  assert.equal(snapshot().level, 'idle')
+})
+
+await test('浏览器工具：5 个工具注册，ref 失效回 STALE_REF 信封', async () => {
+  const nodes = new Map([['e9.1', { epoch: 9, backendNodeId: 1, role: 'link', name: '首页', box: [0, 0, 10, 10] }]])
+  const daemon = {
+    docEpoch: 9,
+    lastUrl: 'https://example.com/',
+    nodes,
+    cdp: { send: async () => ({}) },
+    ensureStarted: async () => ({ state: 'running', exe: 'edge', pid: 1, url: 'about:blank', docEpoch: 9 }),
+    navigate: async (url) => ({ ok: true, url, docEpoch: 9 }),
+    observe: async () => ({ ok: true, text: 'x', refs: [], state: { url: 'https://example.com/', docEpoch: 9, listed: 0, visible: 0 } }),
+    close: async () => ({ ok: true }),
+    status: () => ({ state: 'running' }),
+    // 真实 daemon.act 就是 runSteps 的薄封装，这里照同样的形状接上
+    act: (opts) => runSteps(daemon, opts),
+  }
+  const specs = browserToolSpecs(daemon, {})
+  assert.deepEqual(specs.map((s) => s.name), ['browser_open', 'browser_observe', 'browser_act', 'browser_status', 'browser_close'])
+  const registered = []
+  assert.equal(registerTools({ tools: { register: (def) => registered.push(def) } }, specs).length, 0)
+  assert.equal(registered.length, 5)
+  const act = specs.find((s) => s.name === 'browser_act')
+  // 文档换代后旧 ref 必须明确失效，而不是乱点
+  daemon.docEpoch = 10
+  const stale = await act.handler({ steps: [{ verb: 'click', ref: 'e9.1' }] })
+  assert.equal(stale.ok, false)
+  assert.equal(stale.error.code, 'STALE_REF')
+  assert.equal(typeof stale.error.hint, 'string')
+  const textBlocks = act.render({}, stale)
+  assert.equal(textBlocks[0].type, 'text')
+  assert.match(textBlocks[0].text, /STALE_REF/)
+})
+
+await test('浏览器闭环：runSteps 遇布局变化就停，把新 epoch 交回', async () => {
+  const nodes = new Map([['e1.7', { epoch: 1, backendNodeId: 7, role: 'link', name: 'Go', box: [10, 10, 20, 20] }]])
+  let epoch = 1
+  const daemon = {
+    get docEpoch() {
+      return epoch
+    },
+    lastUrl: 'https://example.com/',
+    nodes,
+    // 点击过程中页面换代（单页应用常见）
+    cdp: {
+      send: async (method) => {
+        if (method === 'Input.dispatchMouseEvent') epoch = 2
+        if (method === 'DOM.getBoxModel') return { model: { content: [10, 10, 30, 10, 30, 30, 10, 30] } }
+        if (method === 'Runtime.evaluate') return { result: { value: { text: 'Go', id: '' } } }
+        return {}
+      },
+    },
+    waitForLoad: async () => {},
+  }
+  const res = await runSteps(daemon, { steps: [{ verb: 'click', ref: 'e1.7' }, { verb: 'click', ref: 'e1.7' }] })
+  assert.equal(res.ok, true)
+  assert.equal(res.stopped, 'document-changed')
+  assert.equal(res.remaining, 1)
+  assert.equal(res.diff.epochAfter, 2)
+})
+
+await test('浏览器闭环：resolveRef 代数不等于 docEpoch 时拒绝点击', async () => {
+  const daemon = {
+    docEpoch: 4,
+    lastUrl: 'https://example.com/',
+    nodes: new Map([['e4.5', { epoch: 3, backendNodeId: 5, role: 'link', name: 'x', box: [0, 0, 4, 4] }]]),
+    cdp: { send: async () => ({}) },
+  }
+  const res = await runSteps(daemon, { steps: [{ verb: 'click', ref: 'e4.5' }] })
+  assert.equal(res.ok, false)
+  assert.equal(res.error.code, 'STALE_REF')
+  assert.match(res.error.message, /epoch 3/)
 })
 
 await test('客户端：sidebar.panellist + main 同 id 注册（stub 加载 client.js）', async () => {

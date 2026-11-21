@@ -1,17 +1,24 @@
 # dsh-deputy — DSH bundle patch layer
 #
-# 把 dsh-deputy 以原生插件形态挂进 profile：id 全局唯一，name 为包名。
-# 插件入口由 package.json 的 main（src/index.mjs → apply(ctx)）声明；
-# 本文件只负责 profile 里的 insert 条目，dsh.client 指向浏览器半 client.js。
-# 本插件不依赖任何外部 npm 包（diff/sheet/png/roi/budget/runner/desktop 均为纯 ESM），
+# 一个包、两个 Cordis 组件（插件管理器里显示成两行，和 billion-context 的做法一致）：
+#   dsh-deputy/os      → src/os.mjs      隔离桌面 + 桌面面板端点 + deputy_* 四个工具
+#   dsh-deputy/browser → src/browser.mjs 浏览器操作骨架（CDP daemon）+ browser_* 五个工具
+# insert 的 name 走 package.json 的 exports 子路径；插件入口就是各自的 apply(ctx)。
+# dsh.client 指向浏览器半 client.js（侧栏「DSH操作电脑」一页 + 行右侧状态点）。
+# 本插件不依赖任何外部 npm 包（diff/sheet/png/roi/budget/runner/desktop/browser 均为纯 ESM），
 # 因此不需要构建授权，也不需要 allowBuilds。
 
 - insert:
-    - id: dsh-deputy
-      name: 'dsh-deputy'
+    - id: dsh-deputy-os
+      name: 'dsh-deputy/os'
       config:
         shipAt: meaningful
         settleMs: 220
         desktop:
           captureWidth: 1280
           captureHeight: 800
+    - id: dsh-deputy-browser
+      name: 'dsh-deputy/browser'
+      config:
+        enabled: true
+        headless: false

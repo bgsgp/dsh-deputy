@@ -2,6 +2,59 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.33
+
+### 一个包拆成两个组件（插件管理器里两行）
+- `dsh-deputy/os`（`src/os.mjs`）：隔离桌面这一半，4 个 `deputy_*` 工具与原样行为不变。
+- `dsh-deputy/browser`（`src/browser.mjs`）：新的浏览器操作组件，5 个 `browser_*` 工具。
+- `cordis.patch.yml` 改成一条 `- insert:` 下两条 entry（`dsh-deputy-os` / `dsh-deputy-browser`），
+  `exports` 增加 `./os` 与 `./browser` 子路径；`src/index.mjs` 退化成 `export * from './os.mjs'`
+  的兼容入口（测试、MCP、外部 import 的老路径照旧）。
+- 抽公共层：`src/registry.mjs`（`toParameters` / `text` / `registerTools` 的唯一实现）、
+  `src/status.mjs`（两个组件共享的状态总线）。
+
+### 侧栏：状态点 + 不再全黑
+- 侧栏「DSH操作电脑」一行右侧加状态点：**绿 = 有桌面/浏览器在跑，红 = 最近一次操作失败，
+  灰 = 都没开**。读 `GET /api/status`（`status.mjs` 合成，优先级 `error > running > idle`），
+  无人订阅时 2 秒轮询自动停。
+- 修掉「能打开桌面但画面全黑」：根因是宿主在找不到窗口时回退到桌面级 `BitBlt`，
+  而隔离桌面没有 DWM 合成，必然全黑；而且 `wantPid=0` 时会把宿主自己的黑底控制台当成
+  最大窗口拍下来。现在 `CaptureWindow(desk, wantPid, excludePid)` 会排除宿主自身进程，
+  找不到就回 `NOWINDOW`，**绝不回退黑图**。
+- 面板对 `NOWINDOW` 给出「桌面里还没有窗口」+「启动 Edge」「启动记事本」按钮，
+  走新的 `POST /api/launch { app: 'edge' | 'notepad' }` 预设。
+
+### 浏览器组件（骨架，按 `context.md` 写，调优留后续）
+- `browser/launch.mjs`：找 Edge/Chrome、挑空闲端口、`--remote-debugging-port` + 独立
+  `user-data-dir` 启动，轮询 `/json/version` 拿 ws 端点。
+- `browser/cdp.mjs`：Node 22 全局 WebSocket 上的极简 CDP 客户端（flatten sessionId 多 target）。
+- `browser/daemon.mjs`：`BrowserDaemon`，懒启动；target/节点两张注册表 + `docEpoch`
+  （`Page.frameNavigated` / `DOM.documentUpdated` / `navigatedWithinDocument` 时自增并清空节点）。
+- `browser/snapshot.mjs`：`DOMSnapshot.captureSnapshot` + `Accessibility.getFullAXTree` 压成文本，
+  剪枝（无 quad / 零尺寸 / `display:none` / `visibility:hidden` / `opacity:0` / `aria-hidden` /
+  装饰容器），视口内与可交互优先，ref 形如 `e<docEpoch>.<nodeIndex>`。
+- `browser/act.mjs`：click/type/key/hover/scroll/press/navigate/wait/reload；
+  前置 `scrollIntoViewIfNeeded` + 中心点 `elementFromPoint` 粗检遮挡，执行用成对
+  `Input.dispatchMouseEvent` 与 `Input.insertText`；批处理**遇 `docEpoch` 变化即停**。
+- `browser/errors.mjs`：失败分类带 `hint`（`STALE_REF` / `DOC_CHANGED` / `OVERLAY` /
+  `AUTH_BLOCKED` / `NAV_TIMEOUT` / `AMBIGUOUS_TARGET` / `NOT_RUNNING` / `CDP_ERROR` / …），
+  工具与 HTTP 共用 `{ ok:false, error:{code,message,hint} }` 信封。
+- 真机跑通主链：headless Edge → `https://www.bilibili.com` → 快照 686 节点 / 列出 240 行 →
+  `act({steps:[{verb:'click',ref:'e4.113'}]})` → `{ok:true, diff:{urlChanged:true, epoch 4→7}}`。
+- 修掉两个只有真机才暴露的快照 bug：① ref 里的代数是局部自增计数器，与 `docEpoch` 不等，
+  导致**每次点击都 STALE_REF**；② 元素节点的 `nodeValue` 是数字 `-1`，原来被输出成 `= "-1"`。
+- 明确未做（列在 `docs/BROWSER.md` 第 7 节）：等待三层（lifecycle + 网络静默 + 元素级）、
+  遮挡自动处理、`disabled` 判定走 AX properties、多标签/iframe/上传下载、跨进程常驻 daemon、
+  凭据脱敏与动作分级、`state.json` 恢复、重试策略。
+
+### 自检
+- `test/run-tests.mjs` 29 → **33 项**：新增状态总线合成、浏览器 5 工具注册与
+  `STALE_REF` 信封、`runSteps` 遇布局变化即停、`resolveRef` 代数校验四条。
+- `scripts/check-plugin.mjs` 增加三段：两个组件（`cordis.patch.yml` 两条 entry +
+  `exports ./os ./browser` 可解析）、`browser_*` 五个工具的 output schema 与 author 参数表、
+  状态总线语义（idle → running → error → 清错回 running）。
+- 新增 `docs/BROWSER.md`；`docs/VIEWER.md` 补 `/api/status`、`NOWINDOW`、`/api/launch` 预设。
+
 ## 1.2.32
 
 ### 常驻宿主的真机修复（隔离桌面里真的打开浏览器并能拍到画面）

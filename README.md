@@ -94,14 +94,23 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 29 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / HTTP 面板 / schema 形态 / 客户端注册
-node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、工具 ABI、image block、icon
+node test/run-tests.mjs        # 33 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器 ref 代数 / 状态总线 / HTTP 面板 / 客户端注册
+node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
 DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 ```
 
-### 四个工具
+### 两个组件、九个工具
+
+插件管理器里这个包显示成**两行**（一个包、两个 Cordis 组件，和 billion-context 一样）：
+
+| 组件 | 入口 | 职责 |
+|---|---|---|
+| `dsh-deputy/os` | `src/os.mjs` | 隔离桌面：会话、采帧、拼图、输入 |
+| `dsh-deputy/browser` | `src/browser.mjs` | 浏览器：独立实例 + CDP + 快照/动作 |
+
+**桌面（os）四个工具**
 
 | 工具 | 作用 | 返回 |
 |---|---|---|
@@ -110,6 +119,16 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `deputy_sheet` | 把缓冲帧压成 4×4 送出 | `{frames, budget, image}` + image content block |
 | `deputy_desktop` | 桌面会话：`status/open/launch/tree/close` | 会话状态 / pid / 窗口树 |
 
+**浏览器（browser）五个工具**（骨架，细节见 [docs/BROWSER.md](docs/BROWSER.md)）
+
+| 工具 | 作用 | 返回 |
+|---|---|---|
+| `browser_open` | 起独立浏览器（独立 user-data-dir + CDP），可选直接导航 | `{ok, state, url, pid, docEpoch}` |
+| `browser_observe` | 把页面压成带 ref 的文本 | `{ok, text, refs, state}` |
+| `browser_act` | 按 ref 顺序执行动作，遇布局变化就停 | `{ok, steps, diff, stopped?, error?}` |
+| `browser_status` | daemon 状态（pid/端口/epoch/最近错误） | `{ok, state, pid, port, url}` |
+| `browser_close` | 关浏览器并清 daemon | `{ok, state}` |
+
 ### 界面：侧栏里的一页
 
 左侧「应用」栏（新建 / 搜索 / 自定义 / QQ机器人 / 定时任务 / …）底部会多一行
@@ -117,7 +136,11 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 
 - 每 0.7 秒拉一帧灰度画面，点画面 = 在隔离桌面里点一下（坐标归一化，缩放不变形）；
 - 「打开桌面」起会话（Windows 上弹 UAC）、「收起桌面」回收；
+- 桌面里还没窗口时（`NOWINDOW`）不再给一张全黑图，而是提示 + 「启动 Edge / 启动记事本」按钮；
 - 这页不是浮窗，也不占会话；切回对话在侧栏点一下即可。
+
+行右侧还有一个小状态点，读 `/api/status`（两个组件共用一条状态总线）：
+**绿 = 有桌面/浏览器在跑，红 = 最近一次操作失败，灰 = 都没开**。
 
 0.2.x 的挂载点是 `sidebar.panellist`（侧栏行）+ `main`（同 key 的整页），细节见 [docs/VIEWER.md](docs/VIEWER.md)。
 
@@ -137,10 +160,12 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 按 DSH 0.2.2 插件 ABI 机检（清单 / 工具 / 图片 / icon） |
 | `scripts/publish-npm.mjs` | ✅ 可用 | 舞台打包 + 直接 npm publish（标准三段版本） |
-| `cordis.patch.yml` | ✅ 已对齐社区格式 | `- insert: - id/name/config` |
+| `cordis.patch.yml` | ✅ 一个包两个组件 | 一条 `- insert:` 下 `dsh-deputy/os` + `dsh-deputy/browser` |
+| `status.mjs` 状态总线 | ✅ 实现 + 单测 | 两组件各写一段，合成 `error > running > idle` 一个点 |
 | MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
 | 侧栏入口（`client.js`） | ✅ 真机验证（0.2.2-rc.5） | 侧栏「应用」一行「DSH操作电脑」+ 中央整页；`sidebar.panellist` / `main` 同 id 注册，`check-plugin` 防回退到 `shell.overlay` |
-| DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；4 个工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），桌面自动化仍待真机回归 |
+| DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），桌面自动化仍待真机回归 |
+| 浏览器组件（`src/browser/`） | 🟡 骨架 + 真机跑通主链 | 起 Edge → 导航 → 快照（686 节点）→ 按 ref 点击 → 回差异；等待三层 / 遮挡处理 / 多标签 / iframe / 凭据脱敏未做，清单见 [docs/BROWSER.md](docs/BROWSER.md) |
 
 **已知未验证点**：x64 `INPUT` 40 字节对齐、`SendInput` 在非活动桌面的实际效果、
 UAC/安全桌面对隔离桌面的抢占。已解决：`SetThreadDesktop` 在 PowerShell 里必须放到
@@ -176,7 +201,12 @@ src/
   runner.mjs      observe → act → verify 闭环（依赖全注入）
   desktop.mjs     虚拟桌面会话：常驻宿主客户端 + 状态机 + sensor/actuator
   uia-bridge.mjs  一次性 PowerShell UIA 后端桥
-  index.mjs       DSH 插件入口（4 个工具 + 能力探测式注册）
+  status.mjs      两组件共享的状态总线（合成侧栏那个状态点）
+  registry.mjs    toParameters / registerTools（0.2.x 工具注册的公共层）
+  os.mjs          组件 dsh-deputy/os：隔离桌面 + 4 个 deputy_* 工具
+  browser.mjs     组件 dsh-deputy/browser：浏览器 daemon + 5 个 browser_* 工具
+  browser/        launch / cdp / daemon / snapshot / act / tools / errors
+  index.mjs       兼容入口：只 `export * from './os.mjs'`
   mcp/server.mjs  最小 MCP stdio 服务
 scripts/
   windows-desktop.ps1  常驻宿主：建桌面 / 启动 / 采帧 / 取树 / 输入
@@ -190,6 +220,7 @@ docs/
   ACTING.md       动作梯度、selector、三分处置、危险闸门
   ISOLATION.md    桌面隔离原理、为什么要 UAC、与 DSH 文件沙箱的区别
   DESKTOP.md      虚拟桌面执行层：常驻宿主、硬性约束、与豆包式方案的差距
+  BROWSER.md      浏览器组件：daemon/ref 生命周期/快照/动作/失败码/调优清单
   INSTALL.md      安装方式、npm 发布、五步验证、UAC 与商城上架
   ROADMAP.md      版本计划
 ```

@@ -64,9 +64,11 @@ ctx.slots.inject('main', () =>
 
 ```
 client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.state
+           ──GET /api/status ──► status.mjs 的合成快照（os + browser 两段 + level）
            ──GET /api/frame  ──► capture() → 灰度 → encodeGrayPng → base64
            ──POST /api/input ──► 归一化坐标 → 像素 → 宿主 SendInput
            ──POST /api/open  ──► CreateDesktopW（Windows 上弹 UAC）
+           ──POST /api/launch ► 宿主 CreateProcessW（支持 app 预设：edge / notepad）
            ──POST /api/close ──► 宿主退出，桌面销毁
 ```
 
@@ -75,6 +77,28 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 
 点击是**归一化坐标**（0..1）：页面被缩放、窗口宽窄变化，命中点不变。宿主协议要像素，
 换算在 `viewer.mjs` 里做（见 `POST /api/input`）。
+
+## 状态点：一个点代表两个组件
+
+`/api/status` 返回 `src/status.mjs` 的合成快照：
+
+```json
+{ "ok": true, "level": "running",
+  "os": { "state": "opened", "running": true, "error": null },
+  "browser": { "state": "stopped", "running": false, "error": null } }
+```
+
+`level` 的优先级是 `error > running > idle`：任一组件最近出过错就是红，任一组件在跑就是绿，
+都没开是灰。`client.js` 每 2 秒拉一次（没人订阅就停），把它渲染成侧栏那一行右侧的小圆点。
+
+`dsh-deputy/os` 与 `dsh-deputy/browser` 是两个 Cordis 条目、互不 inject，
+所以状态放在**模块级总线**而不是 ctx 服务里——同进程、同一份模块实例，两边都写得到。
+
+## 空桌面不再回黑图
+
+隔离桌面里一个窗口都没有时，宿主回 `{ code: 'NOWINDOW' }`（不再回退到桌面级 BitBlt 的黑图）。
+面板把它渲染成「桌面里还没有窗口」+「启动 Edge」「启动记事本」两个按钮，
+点按钮走 `POST /api/launch { app: 'edge' | 'notepad' }`，宿主按预设路径与参数起进程。
 
 ## 安全边界
 
@@ -89,7 +113,7 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 
 | 项 | 现状 |
 |---|---|
-| 真实画面 | 只在 Windows 上才有（宿主是 PowerShell + BitBlt）；其它平台 `/api/frame` 会明确回"桌面未打开"，并告诉客户端 `platform` |
+| 真实画面 | 只在 Windows 上才有（宿主是 PowerShell + 逐窗口 `PrintWindow`）；其它平台 `/api/frame` 会明确回"桌面未打开"，并告诉客户端 `platform` |
 | 鼠标移动 / 滚动 / 键盘 | 目前面板只发了 `click` 与 `type`；滚轮与拖拽需要给宿主加 `input.op` |
 | 帧率 | 700ms 采样，不是流；拖窗口、拖动控件这类连续操作观感一般 |
 | 中央面板 | 打开这页时中央区被整页占用，会话在另一个 key；靠侧栏切回对话 |

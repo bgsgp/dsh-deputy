@@ -138,23 +138,33 @@ public class Desk2 {
         } finally { b.UnlockBits(data); }
     }
 
+    // 在该桌面里挑面积最大的可见窗口（wantPid!=0 时限定 pid；始终排除宿主自己的控制台窗口）。
+    private static IntPtr PickWindow(int wantPid, int excludePid) {
+        IntPtr target = IntPtr.Zero;
+        long bestArea = 0;
+        EnumWindows(delegate(IntPtr hwnd, IntPtr l) {
+            if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return true;
+            RECT r; if (!GetWindowRect(hwnd, out r)) return true;
+            int aw = r.Right - r.Left, ah = r.Bottom - r.Top;
+            if (aw < 80 || ah < 60) return true;
+            uint pid; GetWindowThreadProcessId(hwnd, out pid);
+            if (excludePid != 0 && (int)pid == excludePid) return true;
+            if (wantPid != 0 && (int)pid != wantPid) return true;
+            if ((long)aw * ah > bestArea) { bestArea = (long)aw * ah; target = hwnd; }
+            return true;
+        }, IntPtr.Zero);
+        return target;
+    }
+
     // 隔离桌面没有 DWM 合成，BitBlt 桌面会全黑；改成对该桌面上最大的可见窗口做 PrintWindow(PW_RENDERFULLCONTENT)。
-    public static byte[] CaptureWindow(IntPtr desk, int wantPid) {
+    // excludePid：宿主自己的控制台窗口也是"可见窗口"，黑底窗口会被误当成目标画面，必须排除。
+    // wantPid 找不到窗口时退回"该桌面任意窗口（仍排除宿主）"，避免刚 launch 完窗口还没建出来就报空。
+    public static byte[] CaptureWindow(IntPtr desk, int wantPid, int excludePid) {
         byte[] gray = null;
         OnDesktop(desk, delegate() {
-            IntPtr target = IntPtr.Zero;
-            long bestArea = 0;
-            EnumWindows(delegate(IntPtr hwnd, IntPtr l) {
-                if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return true;
-                RECT r; if (!GetWindowRect(hwnd, out r)) return true;
-                int aw = r.Right - r.Left, ah = r.Bottom - r.Top;
-                if (aw < 80 || ah < 60) return true;
-                uint pid; GetWindowThreadProcessId(hwnd, out pid);
-                if (wantPid != 0 && (int)pid != wantPid) return true;
-                if ((long)aw * ah > bestArea) { bestArea = (long)aw * ah; target = hwnd; }
-                return true;
-            }, IntPtr.Zero);
-            if (target == IntPtr.Zero) throw new InvalidOperationException("桌面上没有可见窗口 pid=" + wantPid);
+            IntPtr target = PickWindow(wantPid, excludePid);
+            if (target == IntPtr.Zero && wantPid != 0) target = PickWindow(0, excludePid);
+            if (target == IntPtr.Zero) throw new InvalidOperationException("隔离桌面里没有可捕获的窗口");
             RECT wr; GetWindowRect(target, out wr);
             int w = wr.Right - wr.Left, h = wr.Bottom - wr.Top;
             if (w <= 0 || h <= 0) throw new InvalidOperationException("窗口尺寸非法");
@@ -339,19 +349,17 @@ try {
                     Reply @{ id = $req.id; ok = $true; pid = $pidOn }
                 }
                 'capture' {
-                    # 隔离桌面没有 DWM 合成，整桌面 BitBlt 全黑；优先抓最近启动的窗口（PrintWindow）。
+                    # 隔离桌面没有 DWM 合成，整桌面 BitBlt 全黑；只抓窗口（PrintWindow），并且排除宿主自己的控制台。
                     $targetPid = 0
                     if ($launched.Count -gt 0) { $targetPid = [int]$launched[$launched.Count - 1] }
                     try {
-                        $bytes = [Deputy.Desk2]::CaptureWindow($handle, $targetPid)
+                        $bytes = [Deputy.Desk2]::CaptureWindow($handle, $targetPid, $PID)
                         $w = [Deputy.Desk2]::CapWidth
                         $h = [Deputy.Desk2]::CapHeight
                         Reply @{ id = $req.id; ok = $true; width = $w; height = $h; source = 'window'; pid = $targetPid; grayBase64 = [Convert]::ToBase64String($bytes) }
                     } catch {
-                        $w = [Deputy.Desk2]::GetSystemMetrics(0)
-                        $h = [Deputy.Desk2]::GetSystemMetrics(1)
-                        $bytes = [Deputy.Desk2]::Capture($handle, $w, $h)
-                        Reply @{ id = $req.id; ok = $true; width = $w; height = $h; source = 'desktop'; note = $_.Exception.Message; grayBase64 = [Convert]::ToBase64String($bytes) }
+                        # 没有窗口就明确说没有：绝不回退到必然全黑的桌面 BitBlt（那正是侧栏页一片黑的成因）。
+                        Reply @{ id = $req.id; ok = $false; code = 'NOWINDOW'; error = '隔离桌面里还没有可捕获的窗口，先启动一个程序'; state = $Name }
                     }
                 }
                 'debug' {
