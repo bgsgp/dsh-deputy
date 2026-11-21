@@ -192,7 +192,9 @@ export function createFakeTransport() {
 }
 
 export class DesktopSession {
-  constructor({ transport, name, captureWidth = 1280, captureHeight = 800, mode = 'isolated' } = {}) {
+  constructor({ transport, name, captureWidth = 1280, captureHeight = 800, mode = 'isolated', transportFor } = {}) {
+    // transportFor(mode) 用于运行时换模式：-Mode 是宿主启动参数，换模式必须换一个宿主进程。
+    this.transportFor = typeof transportFor === 'function' ? transportFor : null
     this.transport = transport ?? createHostTransport({ mode })
     // 'user' = 直接操作当前输入桌面（整屏截图 + SendInput）；
     // 'virtual' = 任务视图里新建一块临时虚拟桌面（彩色整屏 + SendInput，退出时收掉）；
@@ -215,6 +217,28 @@ export class DesktopSession {
     if (this.state !== 'opened' && this.state !== 'running') {
       throw new DesktopError(`${action} 需要已打开的桌面，当前 ${this.state}`, 'ESTATE')
     }
+  }
+
+  /**
+   * 就地切换桌面模式。对象身份保持不变（viewer 在 apply() 时闭包持有了 session），
+   * 内部按需关掉旧宿主、换 transport、回到 idle 等下一次 ensureOpen。
+   */
+  async setMode(mode) {
+    if (!['user', 'virtual', 'isolated'].includes(mode)) {
+      throw new DesktopError(`未知桌面模式 ${mode}`, 'EARGS')
+    }
+    if (mode === this.mode) return this.mode
+    const live = this.state === 'opened' || this.state === 'running'
+    if (live) await this.close()
+    this.mode = mode
+    this.transport = this.transportFor ? this.transportFor(mode) : createHostTransport({ mode })
+    // 换完宿主统一回到 idle：close() 会把 state 记成 closed，但换模式不是"用户收起"，
+    // 下一次 ensureOpen 要能直接重新打开。
+    this.state = 'idle'
+    this.pid = null
+    this.lastError = null
+    this.frameOrigin = { x: 0, y: 0 }
+    return this.mode
   }
 
   async open() {

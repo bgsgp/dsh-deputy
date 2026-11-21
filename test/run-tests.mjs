@@ -806,6 +806,52 @@ await test('virtual 模式：不要求 attached，宿主拒绝输入时抛 VDESK
   await session.close()
 })
 
+await test('桌面模式可运行时切换：setMode 换宿主、保留对象身份、非法模式报错', async () => {
+  // 用户 m03234：默认操作真实桌面（user），但也要能临时换到 virtual / isolated。
+  const made = []
+  const makeTransport = (mode) => {
+    const t = createFakeTransport()
+    t.start = async (name) => {
+      t.state.starts++
+      t.state.closed = false
+      t.state.desktop = name
+      return { ok: true, desktop: name, mode }
+    }
+    made.push({ mode, transport: t })
+    return t
+  }
+  const first = makeTransport('user')
+  const session = new DesktopSession({
+    transport: first,
+    name: 'deputy-mode-test',
+    mode: 'user',
+    transportFor: (next) => makeTransport(next),
+  })
+  await session.open()
+  assert.equal(session.mode, 'user')
+
+  // 打开状态下换模式：先关掉旧宿主，再换 transport，回到 idle 等下次 ensureOpen。
+  await session.setMode('virtual')
+  assert.equal(session.mode, 'virtual', 'setMode 应更新 mode')
+  assert.equal(session.state, 'idle', '换模式后回到 idle')
+  assert.equal(first.state.closed, true, '旧宿主必须被停掉')
+  assert.notEqual(session.transport, first, '必须换成新的 transport')
+  assert.equal(made.length, 2, '新模式的 transport 只能建一个')
+
+  // 换完之后能重新打开，且宿主的 mode 与之一致。
+  await session.ensureOpen()
+  assert.equal(session.state, 'opened')
+  assert.equal(session.mode, 'virtual')
+
+  // 同一个模式重复设置是空操作，不该重建宿主。
+  await session.setMode('virtual')
+  assert.equal(made.length, 2, '模式没变时不重建 transport')
+
+  // 非法模式要报错，不能悄悄退回某个模式。
+  await assert.rejects(() => session.setMode('nope'), (err) => err.code === 'EARGS')
+  await session.close()
+})
+
 await test('应用白名单：只按开始菜单精确名称启动，找不到抛 APP_NOT_FOUND', async () => {
   const session = new DesktopSession({ transport: createFakeTransport(), name: 'deputy-apps-test' })
   await session.open()

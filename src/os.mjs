@@ -38,10 +38,10 @@ export const config = {
   roi: {},
   budget: {},
   desktop: {
-    // virtual = 任务视图里新建一块临时桌面，用完收回（彩色整屏 + SendInput，不碰用户原来的窗口）。默认；
-    // user = 操作本机真实桌面（整屏截图 + SendInput，和用户手动操作是同一张桌面）；
+    // user = 操作本机真实桌面（整屏彩色截图 + SendInput，和用户手动操作是同一张桌面）。默认；
+    // virtual = 任务视图里新建一块临时桌面，用完收回（彩色整屏 + SendInput，不碰用户原来的窗口）；
     // isolated = 独立 Win32 桌面（隔离性最好，但没有 DWM、也不能用 SendInput）。
-    mode: 'virtual',
+    mode: 'user',
     name: null,
     prelaunch: null,
     captureWidth: 1280,
@@ -56,12 +56,17 @@ export const config = {
 
 export const state = { session: null, deputy: null, viewer: null }
 
+/** 三种桌面模式；deputy_desktop 的 open 可以在运行时切换。 */
+export const DESKTOP_MODES = ['user', 'virtual', 'isolated']
+
 function ensureSession(deputyConfig) {
   if (state.session) return state.session
   const d = deputyConfig.desktop ?? {}
-  const mode = d.mode === 'isolated' || d.mode === 'user' ? d.mode : 'virtual'
+  const mode = DESKTOP_MODES.includes(d.mode) ? d.mode : 'user'
   state.session = new DesktopSession({
     transport: createHostTransport({ mode }),
+    // 运行时换模式要换宿主进程（-Mode 是启动参数），所以给出重建 transport 的工厂。
+    transportFor: (next) => createHostTransport({ mode: next }),
     name: d.name ?? undefined,
     captureWidth: d.captureWidth,
     captureHeight: d.captureHeight,
@@ -204,6 +209,11 @@ export function toolSpecs(deputy, session, options = {}) {
         type: 'object',
         properties: {
           op: { type: 'string', enum: ['status', 'open', 'apps', 'launch-app', 'launch', 'tree', 'close'] },
+          mode: {
+            type: 'string',
+            enum: ['user', 'virtual', 'isolated'],
+            description: 'open 时的桌面模式：user=直接操作你现在的真实桌面（默认）；virtual=任务视图里新建临时桌面；isolated=独立 Win32 桌面',
+          },
           exe: { type: 'string', description: 'launch 时要启动的可执行文件' },
           name: { type: 'string', description: 'launch-app 时的应用名，必须是开始菜单清单里的精确名称' },
           args: { type: 'array', items: { type: 'string' } },
@@ -217,6 +227,7 @@ export function toolSpecs(deputy, session, options = {}) {
         required: ['state'],
         properties: {
           state: { type: 'string' },
+          mode: { type: 'string' },
           name: { type: 'string' },
           pid: { type: 'number' },
           error: { type: 'string' },
@@ -230,16 +241,21 @@ export function toolSpecs(deputy, session, options = {}) {
             // 0.2.2 宿主会用 output.schema 校验返回值：给了 pid/error 就必须是
             // number/string，null 会直接报 invalid output（见 m02069 的实测）。
             // schema 子集不支持 nullable，所以没值就整个字段省掉。
-            const value = { state: session.state }
+            const value = { state: session.state, mode: session.mode }
             if (session.name) value.name = session.name
             if (typeof session.pid === 'number') value.pid = session.pid
             const message = session.lastError?.message
             if (message) value.error = message
             return value
           }
-          case 'open':
+          case 'open': {
+            if (args.mode) {
+              if (!DESKTOP_MODES.includes(args.mode)) throw new Error(`未知桌面模式 ${args.mode}`)
+              await session.setMode(args.mode)
+            }
             await session.ensureOpen()
-            return { state: session.state, name: session.name }
+            return { state: session.state, name: session.name, mode: session.mode }
+          }
           case 'apps': {
             await session.ensureOpen()
             const apps = await session.listApps()

@@ -1,4 +1,4 @@
-# 桌面执行层：三种模式（默认 `virtual` 临时虚拟桌面）
+# 桌面执行层：三种模式（默认 `user`，直接操作你现在的桌面）
 
 这篇是两个模式的执行层。`ISOLATION.md` 讲隔离原理；这一版把它做成**活着的会话**，
 并且承认一个事实：**想「像人一样正常操作电脑」，就必须在真实桌面上做**（整屏 + 注入合成事件），
@@ -32,10 +32,12 @@ close()                ────────► 宿主退出 → 桌面销毁
 这就是"真的在里面操作"与"只是在旁边截图"的区别——采帧、取树、输入、目标进程，
 四者处在同一个桌面对象上。
 
-## 1.1 三种模式：`-Mode virtual`（默认）、`-Mode user` 与 `-Mode isolated`
+## 1.1 三种模式：`-Mode user`（默认）、`-Mode virtual` 与 `-Mode isolated`
 
 宿主脚本的参数是 `param([Parameter(Mandatory=$true)][string]$Op, [string]$Name='deputy-default', [ValidateSet('isolated','user','virtual')][string]$Mode='isolated')`，
-JS 侧的默认值来自 `config.desktop.mode`（**默认 `virtual`**），经 `createHostTransport({ mode })` 变成命令行参数 `-Mode virtual`。宿主缺省是 `isolated`，但 JS 每次显式传，实际走配置值。
+JS 侧的默认值来自 `config.desktop.mode`（**默认 `user`**），经 `createHostTransport({ mode })` 变成命令行参数 `-Mode user`。宿主缺省是 `isolated`，但 JS 每次显式传，实际走配置值。
+模式可以在运行时换：`deputy_desktop({ op: 'open', mode: 'virtual' })`，或面板 `POST /api/open {"mode":"isolated"}`。
+`DesktopSession.setMode()` 会关掉旧宿主（`-Mode` 是宿主启动参数）、换一个 transport、把状态打回 `idle`，下一次 `ensureOpen()` 用新模式重开；对象身份不变，面板闭包持有的引用继续有效。
 
 | 维度 | `user` | `isolated` |
 |---|---|---|
@@ -65,18 +67,18 @@ JS 侧的默认值来自 `config.desktop.mode`（**默认 `virtual`**），经 `
 ② `IVirtualDesktopManager.MoveWindowToDesktop` 对别的进程的窗口（例如 DSH 主窗口）返回 `E_ACCESSDENIED`（`0x80070005`），
 所以面板没法跟着挪过去 —— 操作期间用户看到的是新桌面，看不到侧栏那一页。
 
-为什么默认是 `virtual`：既要「真实输入桌面」的能力（DWM 合成整屏 + `SendInput` 真的生效），又不想动用户原来那些窗口。
-`user` 有能力但会直接改用户的桌面；`isolated` 两点都不满足 —— 隐藏桌面拿不到 DWM 合成（桌面级 `BitBlt` 全黑，
-只能逐窗口 `PrintWindow`，用户看起来"只有左上角一块"），它不是输入桌面（`SendInput` 实测 0/N），
-`PostMessage` 又会被 Chromium 这类自绘输入的窗口丢掉 —— 三条叠起来就是"点不动"。
-虚拟桌面两边都占：它是真的输入桌面（彩色整屏 + 合成事件都正常），用户原来的窗口全留在上一张桌面。
+为什么默认是 `user`：用户要的是「操作我现在这张桌面」（m03234）—— 同一个壁纸、同一个任务栏、已经开着的窗口都在，
+点下去就是他自己看到的那块屏幕，不用切桌面。真机验证：`SendInput` 点开记事本正文打出 `deputy desktop ok 123`，整屏彩色 1920×1080。
+`virtual` 是"干净的新桌面"，`isolated` 是"完全不碰你的桌面"，两者保留为可选项。
+`isolated` 之所以"点不动、只有左上角"：隐藏桌面拿不到 DWM 合成（桌面级 `BitBlt` 全黑，只能逐窗口 `PrintWindow`），
+也不是输入桌面（`SendInput` 实测 0/N），`PostMessage` 又会被 Chromium 这类自绘输入的窗口丢掉。
 
 DPI 一条必须记住：真实桌面模式（`user`/`virtual`）启动后立刻调 `[Deputy.Desk2]::MakeDpiAware()`（内部 `SetProcessDPIAware`）。
 不声明 DPI 感知时，150% 缩放下 `GetSystemMetrics(SM_CXSCREEN)` 只给 1280×720，而我们截的是物理 1920×1080，
 点击坐标会整体偏 —— 真机上第一帧 1280×720、下一帧才变 1920×1080，就是这个坑。
 
-切换方式：`cordis.patch.yml` 里 `dsh-deputy-os` 的 `config.desktop.mode: virtual`（或安装后在插件配置里改）。
-改成 `user` 就直接对当前桌面动手（面板就在眼前，但真的占用键鼠）；改成 `isolated` 即回到"完全不碰你桌面"的老行为。
+切换方式：`cordis.patch.yml` 里 `dsh-deputy-os` 的 `config.desktop.mode: user`（或安装后在插件配置里改），也可以在运行时用 `open` 的 `mode` 参数切，不必重启。
+`user` 直接对当前桌面动手（面板就在眼前，但真的占用键鼠）；`virtual` 换成临时桌面跑；`isolated` 回到"完全不碰你桌面"的老行为。
 
 ## 1.2 应用白名单：只按开始菜单里的精确名称启动
 

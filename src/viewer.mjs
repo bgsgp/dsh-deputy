@@ -217,9 +217,11 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
     if (url.pathname === '/api/open') {
       if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
       try {
+        const body = await readBody(req)
+        if (body?.mode && typeof session.setMode === 'function') await session.setMode(body.mode)
         await session.ensureOpen()
         setOsStatus({ state: session.state, running: true, error: null })
-        return json(res, 200, { ok: true, state: session.state, name: session.name })
+        return json(res, 200, { ok: true, state: session.state, name: session.name, mode: session.mode })
       } catch (e) {
         noteFailure('os', e)
         return json(res, 200, { ok: false, reason: e.message, code: e.code ?? null })

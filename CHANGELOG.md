@@ -2,6 +2,18 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.47
+
+默认桌面模式从 `virtual` 改成 `user`：**直接操作你现在的这张桌面**。
+
+- 起因：任务视图虚拟桌面虽然能跑（彩色整屏 + `SendInput` 都验证过），但它会把你切到另一块桌面，不符合「就是我现在这张桌面」。
+  真实桌面路线已真机验证：`SendInput` 点开记事本正文打出 `deputy desktop ok 123`，整屏彩色 1920×1080。
+- `config.desktop.mode` 默认 `user`；未知值归一化到 `user`（配错不会退回虚拟桌面）。
+- 新增运行时切换：`deputy_desktop({ op: 'open', mode: 'user' | 'virtual' | 'isolated' })`、面板 `POST /api/open {"mode": ...}`；
+  `DesktopSession.setMode()` 关旧宿主 → 换 transport → 回 `idle`，对象身份不变（面板闭包持有的引用继续有效），下一次 `ensureOpen()` 用新模式重开。
+- `deputy_desktop` 的 `status`/`open` 回包里带 `mode`，模型能确认当前在哪张桌面上。
+- 自检 55 → 56 项（新增「桌面模式可运行时切换」）；`scripts/check-plugin.mjs` 断言改成"默认必须是 user + 支持运行时切换"。
+
 ## 1.3.46
 
 ### 默认桌面模式改为 `virtual`（任务视图里的临时虚拟桌面）

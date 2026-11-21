@@ -412,9 +412,10 @@ if (exists(ps1Path)) {
     ? ok('宿主注明关闭虚拟桌面的顺序（先切回原桌面再 F4 会删掉用户桌面）')
     : warn('宿主未说明 virtual 模式的关闭顺序')
   const osSrc = exists('src/os.mjs') ? readFileSync(path.join(ROOT, 'src/os.mjs'), 'utf8') : ''
-  osSrc.includes("mode: 'virtual'") && osSrc.includes("? d.mode : 'virtual'")
-    ? ok('os 组件默认 virtual，且只认 isolated/user 两个显式值')
-    : bad('os 组件的默认模式不是 virtual（配错会退回直接动用户桌面）')
+  // 默认必须是 user：用户 m03234 明确要"操作我现在这张桌面"；virtual/isolated 只能显式选。
+  osSrc.includes("mode: 'user'") && osSrc.includes("DESKTOP_MODES.includes(d.mode) ? d.mode : 'user'")
+    ? ok('os 组件默认 user（操作真实桌面），配错也只退回 user')
+    : bad('os 组件的默认模式不是 user（用户要求直接操作真实桌面），或未归一化未知模式')
   // 应用白名单：只能从开始菜单清单按精确名称启动（豆包那套 ⑤）。
   for (const needle of ['Get-StartApps', "'launch-app'", 'APP_NOT_FOUND', 'APP_NOT_LAUNCHABLE', 'APP_TARGET_MISSING', 'Start Menu']) {
     ps1.includes(needle) ? ok('宿主应用白名单用到 ' + needle) : bad('宿主缺少 ' + needle + '（启动程序没有白名单约束）')
@@ -449,6 +450,18 @@ if (exists(ps1Path)) {
   viewerSrc.includes('maxWidth: 1600')
     ? ok('viewer 请求帧时做了 1600 宽缩放（控制 PNG 体积）')
     : warn('viewer 未限制帧宽度，1080p 彩色帧偏大')
+  // 运行时换模式：user / virtual / isolated 三个模式共用一个 session 对象。
+  deskSrc.includes('async setMode(mode)') && deskSrc.includes('this.transportFor')
+    ? ok('DesktopSession.setMode 可运行时换模式（保留对象身份）')
+    : bad('DesktopSession 缺少 setMode，运行中无法在 user/virtual/isolated 之间切换')
+  osSrc.includes('transportFor: (next) => createHostTransport') &&
+  osSrc.includes("mode: {") &&
+  !osSrc.includes('mode: \'virtual\',')
+    ? ok('deputy_desktop open 支持 mode 参数切换桌面')
+    : bad('deputy_desktop open 未暴露 mode 参数')
+  viewerSrc.includes('session.setMode(')
+    ? ok('面板 /api/open 可以带 mode（网页上能选桌面模式）')
+    : warn('面板 /api/open 不接受 mode，只能在工具里切换')
 } else {
   bad('缺少 ' + ps1Path)
 }

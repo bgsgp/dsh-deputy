@@ -48,18 +48,18 @@ dsh plugin --profile web add dsh-deputy
 | **变化即证据** | 帧的价值 = 相对上一帧变了多少；0..1 分数分四档（still/minor/meaningful/major） |
 | **语义优先** | UIA `InvokePattern`/`ValuePattern` 打头，键鼠是兜底不是首选 |
 | **ROI 校验** | 动作后只比对它该影响的区域，并额外检测"别处有没有被带脏" |
-| **三种桌面模式** | `virtual`（默认）：任务视图里新建一块临时桌面，彩色整屏 + `SendInput`，关会话即收回；`user`：整屏 + `SendInput`，和你手动操作是同一张桌面；`isolated`：常驻宿主握独立 Desktop，`PrintWindow` + `PostMessage`，不抢焦点 |
+| **三种桌面模式** | `user`（默认）：整屏彩色截图 + `SendInput`，和你手动操作是**同一张桌面**；`virtual`：任务视图里新建一块临时桌面，彩色整屏 + `SendInput`，关会话即收回；`isolated`：常驻宿主握独立 Desktop，`PrintWindow` + `PostMessage`，不抢焦点 |
 
 ---
 
 ## 三种桌面模式
 
-`config.desktop.mode` 决定动作落在哪张桌面上（默认 `virtual`）：
+`config.desktop.mode` 决定动作落在哪张桌面上（默认 `user`，也就是**你现在正看着的这张桌面**）；运行时也能换（`deputy_desktop` 的 `open` 带 `mode`，或面板 `POST /api/open {"mode":"virtual"}`）：
 
 | 模式 | 桌面 | 你看到的 | 采帧 | 点击 / 打字 | 会抢你的鼠标吗 |
 |---|---|---|---|---|---|
-| `user` | 你自己的真实桌面 | 整屏（真机 1920×1080，含任务栏、其它窗口） | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：点击前把目标窗口提到前台 |
-| `virtual`（默认） | 任务视图里**新建的临时桌面**（`Win+Ctrl+D`） | 整屏彩色、完整，但只有壁纸和图标——你原来那些窗口都留在上一张桌面上 | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：操作期间你的屏幕就在这张新桌面上 |
+| `user`（默认） | 你自己的真实桌面 | 整屏（真机 1920×1080，含任务栏、其它窗口） | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：点击前把目标窗口提到前台 |
+| `virtual` | 任务视图里**新建的临时桌面**（`Win+Ctrl+D`） | 整屏彩色、完整，但只有壁纸和图标——你原来那些窗口都留在上一张桌面上 | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：操作期间你的屏幕就在这张新桌面上 |
 | `isolated` | 宿主 `CreateDesktopW` 新建的隐藏桌面 | 该桌面里的窗口（不是整屏） | 逐窗口 `PrintWindow`（无 DWM，桌面级 BitBlt 全黑） | `PostMessage` 直投窗口 | 不会 |
 
 `virtual` 就是「豆包虚拟桌面」那套观感：真机实测开出来的新桌面是完整彩色壁纸 + 图标 + 任务栏，
@@ -71,12 +71,14 @@ dsh plugin --profile web add dsh-deputy
 另外 DSH 面板窗口本身在你的原桌面上（`MoveWindowToDesktop` 对别人的窗口返回 `E_ACCESSDENIED`），
 所以操作期间你看不到侧栏那一页，只能看到被操作的新桌面；中途切走桌面时输入会被拒绝并回 `VDESK_NOT_ACTIVE`。
 
-为什么默认是 `virtual`：这样自动化跑的是一块**干净的新桌面**（只有壁纸、图标、任务栏），你原来的窗口全部留在上一张桌面，不会被误点、也不会被我们开的程序堆满；关会话桌面就收回。它之所以必须选虚拟桌面而不是隐藏桌面：豆包那类「电脑操作」= **真实输入桌面**上整屏截图 + 注入合成键盘鼠标事件。
+为什么默认是 `user`：你要的是「操作我现在这张桌面」——同一个壁纸、同一个任务栏、你已经开着的那些窗口，点下去就是你自己看到的那块屏幕，不用切桌面、也没有观感落差。
+`virtual`（新桌面）和 `isolated`（隐藏桌面）都保留为可选：前者适合"别动我开着的窗口"，后者适合"完全别碰我的鼠标"。
+而隐藏桌面为什么"点不动、只有左上角"：`CreateDesktop` 出来的桌面没有 DWM 合成（只能逐窗口抓），也不是输入桌面（`SendInput` 实测接受 0/N 个事件），这才逼出了「真实输入桌面 + 整屏 BitBlt」这条路。
 而 `CreateDesktop` 隐藏桌面拿不到合成画面（只能逐窗口抓，所以看起来"只有左上角"），它不是输入桌面、
 `SendInput` 实测接受 0/N 个事件，Chromium 这类自绘输入的窗口还会丢 `PostMessage` —— 表现就是"点不动"。
 
-代价也说清楚：`virtual` 模式操作期间屏幕会切到那块临时桌面，鼠标键盘被合成事件占用（你自己的窗口都留在上一张桌面，不会被动到），跑任务时不要抢鼠标；需要"不打断你"时把
-`mode` 切回 `isolated`（能力受限，但完全不碰你的桌面）；只跑一次、不想换桌面就用 `user`。
+代价也说清楚：`user` 模式是在你真桌上直接注入合成键鼠事件，点击前会先把目标窗口提到前台——跑任务时别抢鼠标，重要窗口（Excel、IDE）请先存盘。
+不想被打断就切 `virtual`（全程在另一块临时桌面上跑，你自己的窗口留在原桌面），要完全不碰鼠标就用 `isolated`（能力受限：无 DWM、只能窗口级截图 + `PostMessage`）。
 
 ## 对照豆包那套「截图 → 点击」闭环
 
@@ -86,7 +88,7 @@ dsh plugin --profile web add dsh-deputy
 |---|---|
 | ① 坐标归一化到 0–1000 | ✅ 面板把 0..1 归一化坐标换成帧像素，再按 `frameWidth`（缩放前）换算，附窗口 `origin` 偏移 |
 | ② 改布局的动作之后必须重新截图再算坐标 | ✅ `runner.step` 发现画面尺寸/布局变化就回 `rescan: true`，模型据此重新 `deputy_sense`/`/api/frame`，不许照旧图连点 |
-| ③ 会话隔离用另一块桌面 | ✅ `mode: virtual`（任务视图新桌面）/`isolated`（独立 Win32 桌面）/ `user`（当前桌面） |
+| ③ 会话隔离用另一块桌面 | ✅ `mode: user`（默认，你现在的真实桌面）/`virtual`（任务视图新桌面）/`isolated`（独立 Win32 桌面），运行时可用 `open` 的 `mode` 切换 |
 | ④ 登录、验证码、扫码、MFA 一律交人 | 🟡 只做到"失败不硬撑"：动作校验不过就停、回 `verdict`；**没有**自动识别登录页并交还控制权（见 [docs/ROADMAP.md](docs/ROADMAP.md)） |
 | ⑤ 应用必须按开始菜单清单的精确名称启动 | ✅ `deputy_desktop { op: "apps" }` 枚举开始菜单（`.lnk`/`.url` + `shell:AppsFolder` 打包应用，真机 207 项），`op: "launch-app", name: "Google Chrome"` 只认精确名称；找不到回 `APP_NOT_FOUND` + 候选名 |
 | ⑥ 落盘类操作用文件系统回读校验 | 🟡 插件自身不做，但会话侧的 `read`/`glob` 就是回读通道（截图说保存成功 ≠ 文件在） |
@@ -137,7 +139,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 55 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
+node test/run-tests.mjs        # 56 项自检：算法 / 闭环 / 桌面状态机与模式切换 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -204,7 +206,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `budget.mjs` 预算 | ✅ 实现 + 单测 | 三档降级 |
 | `runner.mjs` 闭环 | ✅ 实现 + 单测（注入式，无需 Windows） | 重试 / 熔断 |
 | 应用白名单（开始菜单） | ✅ 真机验证 | `op: "apps"` 枚举 `.lnk`/`.url` + `shell:AppsFolder`（真机 207 项）；`op: "launch-app"` 只认精确名称，真机拉起 Chrome 到虚拟桌面新标签页、记事本走打包应用通道 |
-| `desktop.mjs` 桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭；`mode=user\|virtual\|isolated` 透传给宿主；宿主拒绝输入时抛 `VDESK_NOT_ACTIVE` |
+| `desktop.mjs` 桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭；`mode=user\|virtual\|isolated` 透传给宿主，`setMode()` 运行时换宿主但保留对象身份；宿主拒绝输入时抛 `VDESK_NOT_ACTIVE` |
 | `scripts/windows-desktop.ps1` | ✅ 三模式真机验证 | 常驻宿主 `-Mode user\|isolated`。`user`：整屏 1920×1080 捕获 + `SendInput`，实测点开记事本正文打出 `deputy user desktop ok 123`；`isolated`：建桌面 + 逐窗口 `PrintWindow` + `PostMessage`，实测打开 Edge 拍到 B 站首页并打出 `deputy desktop hello 123`；`virtual`：`Win+Ctrl+D` 新桌面 + 彩色整屏 + `SendInput`，实测记事本里打出 `deputy virtual desktop ok 789` 且关会话后桌面数回到 1 |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 按 DSH 0.2.2 插件 ABI 机检（清单 / 工具 / 图片 / icon） |

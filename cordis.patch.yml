@@ -19,9 +19,9 @@
         shipAt: meaningful
         settleMs: 220
         desktop:
-          # virtual = 任务视图新建临时桌面（完成即收回，默认）；
-          # user = 操作当前桌面（整屏截图 + SendInput）；isolated = 独立 Win32 桌面。
-          mode: virtual
+          # user = 直接操作你现在的真实桌面（整屏彩色截图 + SendInput，默认）；
+          # virtual = 任务视图新建临时桌面（完成即收回）；isolated = 独立 Win32 桌面。
+          mode: user
           captureWidth: 1280
           captureHeight: 800
     - id: dsh-deputy-browser
