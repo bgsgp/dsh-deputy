@@ -2,6 +2,30 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.2.32
+
+### 常驻宿主的真机修复（隔离桌面里真的打开浏览器并能拍到画面）
+- **窗口捕获取代全桌面 BitBlt**：隔离桌面没有 DWM 合成，桌面级 `BitBlt(GetDC(NULL))` 必然全黑。
+  新增 `CaptureWindow(desk, wantPid)`：在已 `SetThreadDesktop` 的宿主里枚举该桌面的可见窗口，
+  按面积取最大（可限定 pid），`PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT=2)` 后转灰度。
+  找不到窗口才回退桌面 BitBlt，并在回执里标 `source: "desktop"` 说明降级原因。
+- **启动命令要给 exe 加引号**：`CreateProcessW(exe, exe + " " + args)` 会把
+  `C:/Program Files (x86)/...` 按空格拆开，浏览器于是把 `files`、`(x86)` 当成网址打开
+  （现场表现是 `DNS_PROBE_FINISHED_NXDOMAIN`）。改为 `"\"" + exe + "\" " + args`。
+- **桌面相关操作移进无窗口的 STA 后台线程**：主线程已有控制台窗口，`SetThreadDesktop` 返回
+  `ERROR_BUSY(170)`，一切操作都落在用户桌面上（树里能看到用户自己的窗口）。
+  新增 `OnDesktop(desk, action)`，在从未建过窗口的新线程里切桌面再执行。
+- **传输握手补 `create` 回执**：`transport.start` 发的 `{op:'create'}` 原先无人应答。
+- **控制台编码改 UTF-8**：窗口标题里的中文不再输出成 GBK 乱码（`无标题` 不再变 `�ޱ���`）。
+- **脚本必须存成 UTF-8 with BOM**：UTF-8 无 BOM 时 Windows PowerShell 按 CP936 解码，
+  中文注释尾部字节会吞掉换行，后续 C# 成员被并进注释行，报
+  `类、结构或接口成员声明中的标记"="无效`。`Add-Type` 也去掉了与 `-TypeDefinition`
+  冲突的 `-Namespace`/`-Name`（原先报 `AmbiguousParameterSet`，被误读成参数绑定失败）。
+- 新增只读诊断 op `debug`：线程桌面名 / 桌面句柄 / 枚举窗口数 / UIA 根子元素数，
+  用于确认"到底在哪个桌面"。
+- 真机回归：隔离桌面里启动 Edge 打开 `https://www.bilibili.com`，
+  窗口标题与 1946×1106 灰度帧（`bright=44022`，PNG 756 KB）都取到，画面确认是 B 站首页。
+
 ## 1.2.31
 
 ### 对齐 DSH 0.2.2 的插件 ABI

@@ -1,4 +1,4 @@
-# dsh-deputy · 虚拟桌面宿主（原型）
+﻿# dsh-deputy · 虚拟桌面宿主（原型）
 #
 # 用法：powershell -File windows-desktop.ps1 -Op host -Name deputy-xxxx
 #   该进程会创建独立 Desktop 并**常驻**，通过 stdin/stdout 收发"行分隔 JSON"：
@@ -23,12 +23,186 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing, System.Windows.Forms
 
-Add-Type -Namespace Deputy -Name Desk2 -Language CSharp -TypeDefinition @'
+Add-Type -Language CSharp -ReferencedAssemblies 'System.Drawing', 'WindowsBase', 'UIAutomationClient', 'UIAutomationTypes' -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+
+namespace Deputy {
 
 public class Desk2 {
+    public static int CapWidth, CapHeight;
+    public static string LaunchNote = "";
+
+    // 关键：主线程（PowerShell 控制台）已经创建过窗口，SetThreadDesktop 会报 ERROR_BUSY(170)。
+    // 所以在一条从未创建窗口的新线程上切桌面，再在该线程里做 GDI 捕获 / 注入输入。
+    private static void OnDesktop(IntPtr desk, Action body) {
+        Exception err = null;
+        Thread t = new Thread(delegate() {
+            try {
+                if (!SetThreadDesktop(desk)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                body();
+            } catch (Exception e) { err = e; }
+        });
+        t.IsBackground = true;
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+        t.Join();
+        if (err != null) throw err;
+    }
+
+    public static byte[] Capture(IntPtr desk, int w, int h) {
+        byte[] gray = null;
+        OnDesktop(desk, delegate() {
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            IntPtr memDc = CreateCompatibleDC(screenDc);
+            IntPtr bmp = CreateCompatibleBitmap(screenDc, w, h);
+            IntPtr old = SelectObject(memDc, bmp);
+            try {
+                BitBlt(memDc, 0, 0, w, h, screenDc, 0, 0, SRCCOPY);
+                using (var img = System.Drawing.Image.FromHbitmap(bmp)) {
+                    using (var b = new System.Drawing.Bitmap(img)) {
+                        var rect = new System.Drawing.Rectangle(0, 0, w, h);
+                        var data = b.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                        try {
+                            byte[] raw = new byte[data.Stride * h];
+                            Marshal.Copy(data.Scan0, raw, 0, raw.Length);
+                            gray = new byte[w * h];
+                            for (int y = 0; y < h; y++) {
+                                int row = y * data.Stride;
+                                int o = y * w;
+                                for (int x = 0; x < w; x++) {
+                                    int i = row + x * 4;
+                                    gray[o + x] = (byte)((raw[i + 2] * 77 + raw[i + 1] * 151 + raw[i] * 28) >> 8);
+                                }
+                            }
+                        } finally { b.UnlockBits(data); }
+                    }
+                }
+            } finally {
+                SelectObject(memDc, old);
+                DeleteObject(bmp);
+                DeleteDC(memDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+            }
+            CapWidth = w; CapHeight = h;
+        });
+        return gray;
+    }
+
+    public static string[] Tree(IntPtr desk) {
+        string[] rows = null;
+        OnDesktop(desk, delegate() {
+            var list = new System.Collections.Generic.List<string>();
+            System.Windows.Automation.AutomationElement root = System.Windows.Automation.AutomationElement.RootElement;
+            System.Windows.Automation.TreeWalker walker = System.Windows.Automation.TreeWalker.ControlViewWalker;
+            System.Windows.Automation.AutomationElement child = walker.GetFirstChild(root);
+            while (child != null) {
+                var r = child.Current.BoundingRectangle;
+                string nm = (child.Current.Name ?? "").Replace("\t", " ").Replace("\r", " ").Replace("\n", " ");
+                list.Add(nm + "\t" + child.Current.ControlType.ProgrammaticName.Replace("ControlType.", "") + "\t" + child.Current.ProcessId + "\t" + (int)r.X + "," + (int)r.Y + "," + (int)r.Width + "," + (int)r.Height);
+                child = walker.GetNextSibling(child);
+            }
+            rows = list.ToArray();
+        });
+        return rows;
+    }
+
+    [DllImport("user32.dll")] public static extern bool EnumDesktopWindows(IntPtr hdesk, EnumWindowsProc cb, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr l);
+    public delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr l);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT r);
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+
+    private static byte[] ToGray(System.Drawing.Bitmap b, int w, int h) {
+        var rect = new System.Drawing.Rectangle(0, 0, w, h);
+        var data = b.LockBits(rect, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try {
+            byte[] raw = new byte[data.Stride * h];
+            Marshal.Copy(data.Scan0, raw, 0, raw.Length);
+            byte[] gray = new byte[w * h];
+            for (int y = 0; y < h; y++) {
+                int row = y * data.Stride;
+                int o = y * w;
+                for (int x = 0; x < w; x++) {
+                    int i = row + x * 4;
+                    gray[o + x] = (byte)((raw[i + 2] * 77 + raw[i + 1] * 151 + raw[i] * 28) >> 8);
+                }
+            }
+            return gray;
+        } finally { b.UnlockBits(data); }
+    }
+
+    // 隔离桌面没有 DWM 合成，BitBlt 桌面会全黑；改成对该桌面上最大的可见窗口做 PrintWindow(PW_RENDERFULLCONTENT)。
+    public static byte[] CaptureWindow(IntPtr desk, int wantPid) {
+        byte[] gray = null;
+        OnDesktop(desk, delegate() {
+            IntPtr target = IntPtr.Zero;
+            long bestArea = 0;
+            EnumWindows(delegate(IntPtr hwnd, IntPtr l) {
+                if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return true;
+                RECT r; if (!GetWindowRect(hwnd, out r)) return true;
+                int aw = r.Right - r.Left, ah = r.Bottom - r.Top;
+                if (aw < 80 || ah < 60) return true;
+                uint pid; GetWindowThreadProcessId(hwnd, out pid);
+                if (wantPid != 0 && (int)pid != wantPid) return true;
+                if ((long)aw * ah > bestArea) { bestArea = (long)aw * ah; target = hwnd; }
+                return true;
+            }, IntPtr.Zero);
+            if (target == IntPtr.Zero) throw new InvalidOperationException("桌面上没有可见窗口 pid=" + wantPid);
+            RECT wr; GetWindowRect(target, out wr);
+            int w = wr.Right - wr.Left, h = wr.Bottom - wr.Top;
+            if (w <= 0 || h <= 0) throw new InvalidOperationException("窗口尺寸非法");
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            IntPtr memDc = CreateCompatibleDC(screenDc);
+            IntPtr bmp = CreateCompatibleBitmap(screenDc, w, h);
+            IntPtr old = SelectObject(memDc, bmp);
+            try {
+                PrintWindow(target, memDc, 2);
+                using (var img = System.Drawing.Image.FromHbitmap(bmp)) {
+                    using (var b = new System.Drawing.Bitmap(img)) { gray = ToGray(b, w, h); }
+                }
+            } finally {
+                SelectObject(memDc, old);
+                DeleteObject(bmp);
+                DeleteDC(memDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+            }
+            CapWidth = w; CapHeight = h;
+        });
+        return gray;
+    }
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool GetUserObjectInformationW(IntPtr hObj, int index, StringBuilder info, int len, out int needed);
+
+    public static string Debug(IntPtr desk) {
+        string report = "";
+        OnDesktop(desk, delegate() {
+            var sb = new StringBuilder(512);
+            int need;
+            GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), 2, sb, 1024, out need);
+            int n = 0;
+            bool ew = EnumWindows(delegate(IntPtr h, IntPtr l) { n++; return true; }, IntPtr.Zero);
+            int ewErr = Marshal.GetLastWin32Error();
+            int uia = 0;
+            System.Windows.Automation.AutomationElement root = System.Windows.Automation.AutomationElement.RootElement;
+            System.Windows.Automation.TreeWalker walker = System.Windows.Automation.TreeWalker.ControlViewWalker;
+            System.Windows.Automation.AutomationElement c = walker.GetFirstChild(root);
+            while (c != null && uia < 100) { uia++; c = walker.GetNextSibling(c); }
+            report = "tid=" + GetCurrentThreadId() + " desk=" + sb.ToString() + " thDesk=" + GetThreadDesktop(GetCurrentThreadId()).ToString()
+                + " given=" + desk.ToString() + " enum=" + n + " ew=" + (ew ? 1 : 0) + " err=" + ewErr + " uia=" + uia;
+        });
+        return report;
+    }
+
+    public static void ClickOn(IntPtr desk, int x, int y, bool right) { OnDesktop(desk, delegate() { Click(x, y, right); }); }
+    public static void TypeOn(IntPtr desk, string text) { OnDesktop(desk, delegate() { TypeText(text); }); }
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct STARTUPINFO {
         public int cb;
@@ -93,7 +267,7 @@ public class Desk2 {
         si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
         si.lpDesktop = desktop;
         PROCESS_INFORMATION pi;
-        if (!CreateProcessW(exe, exe + " " + args, IntPtr.Zero, IntPtr.Zero, false,
+        if (!CreateProcessW(exe, "\"" + exe + "\" " + args, IntPtr.Zero, IntPtr.Zero, false,
             CREATE_NEW_CONSOLE, IntPtr.Zero, null, ref si, out pi))
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         return pi.dwProcessId;
@@ -116,6 +290,7 @@ public class Desk2 {
         }
     }
 }
+}
 '@
 
 function Reply($obj) {
@@ -129,6 +304,7 @@ if ($Op -ne 'host') {
     exit 2
 }
 
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 $script:out = [Console]::Out
 $handle = $null
 $launched = @()
@@ -137,7 +313,8 @@ try {
     $handle = [Deputy.Desk2]::Create($Name)
     # 关键：在创建任何窗口之前把本线程缠到隔离桌面
     $attached = [Deputy.Desk2]::SetThreadDesktop($handle)
-    Reply @{ id = 0; ok = $true; desktop = $Name; attached = $attached; pid = $PID }
+    $attachErr = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    Reply @{ id = 0; ok = $true; desktop = $Name; attached = $attached; attachErr = $attachErr; pid = $PID }
 }
 catch {
     Reply @{ id = 0; ok = $false; error = $_.Exception.Message; code = 'ECREATE' }
@@ -152,53 +329,53 @@ try {
         $req = $line | ConvertFrom-Json
         try {
             switch ($req.op) {
+                'create' {
+                    # 桌面在进程启动时已建好，这里只做幂等确认，兼容传输层的 create 握手。
+                    Reply @{ id = $req.id; ok = $true; desktop = $Name; attached = $attached; pid = $PID }
+                }
                 'launch' {
                     $pidOn = [Deputy.Desk2]::Launch($req.exe, [string]$req.args, $Name)
                     $launched += $pidOn
                     Reply @{ id = $req.id; ok = $true; pid = $pidOn }
                 }
                 'capture' {
-                    $w = [Deputy.Desk2]::GetSystemMetrics(0)
-                    $h = [Deputy.Desk2]::GetSystemMetrics(1)
-                    $screenDc = [Deputy.Desk2]::GetDC([IntPtr]::Zero)
-                    $memDc = [Deputy.Desk2]::CreateCompatibleDC($screenDc)
-                    $bmp = [Deputy.Desk2]::CreateCompatibleBitmap($screenDc, $w, $h)
-                    [Deputy.Desk2]::SelectObject($memDc, $bmp) | Out-Null
-                    [Deputy.Desk2]::BitBlt($memDc, 0, 0, $w, $h, $screenDc, 0, 0, [Deputy.Desk2]::SRCCOPY) | Out-Null
-                    $img = [System.Drawing.Image]::FromHbitmap($bmp)
-                    $bytes = New-Object byte[] ($w * $h)
-                    for ($y = 0; $y -lt $h; $y++) {
-                        for ($x = 0; $x -lt $w; $x++) {
-                            $c = $img.GetPixel($x, $y)
-                            $bytes[$y * $w + $x] = [byte](($c.R * 77 + $c.G * 151 + $c.B * 28) / 256)
-                        }
+                    # 隔离桌面没有 DWM 合成，整桌面 BitBlt 全黑；优先抓最近启动的窗口（PrintWindow）。
+                    $targetPid = 0
+                    if ($launched.Count -gt 0) { $targetPid = [int]$launched[$launched.Count - 1] }
+                    try {
+                        $bytes = [Deputy.Desk2]::CaptureWindow($handle, $targetPid)
+                        $w = [Deputy.Desk2]::CapWidth
+                        $h = [Deputy.Desk2]::CapHeight
+                        Reply @{ id = $req.id; ok = $true; width = $w; height = $h; source = 'window'; pid = $targetPid; grayBase64 = [Convert]::ToBase64String($bytes) }
+                    } catch {
+                        $w = [Deputy.Desk2]::GetSystemMetrics(0)
+                        $h = [Deputy.Desk2]::GetSystemMetrics(1)
+                        $bytes = [Deputy.Desk2]::Capture($handle, $w, $h)
+                        Reply @{ id = $req.id; ok = $true; width = $w; height = $h; source = 'desktop'; note = $_.Exception.Message; grayBase64 = [Convert]::ToBase64String($bytes) }
                     }
-                    $img.Dispose()
-                    [Deputy.Desk2]::DeleteObject($bmp) | Out-Null
-                    [Deputy.Desk2]::DeleteDC($memDc) | Out-Null
-                    [Deputy.Desk2]::ReleaseDC([IntPtr]::Zero, $screenDc) | Out-Null
-                    Reply @{ id = $req.id; ok = $true; width = $w; height = $h; grayBase64 = [Convert]::ToBase64String($bytes) }
+                }
+                'debug' {
+                    Reply @{ id = $req.id; ok = $true; info = [Deputy.Desk2]::Debug($handle) }
                 }
                 'tree' {
-                    $root = [System.Windows.Automation.AutomationElement]::RootElement
-                    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+                    $rows = [Deputy.Desk2]::Tree($handle)
                     $items = @()
-                    $child = $walker.GetFirstChild($root)
-                    while ($child -ne $null) {
+                    foreach ($row in $rows) {
+                        $p = $row -split "`t"
+                        $rect = $p[3] -split ','
                         $items += @{
-                            name = $child.Current.Name
-                            type = $child.Current.ControlType.ProgrammaticName -replace 'ControlType\.', ''
-                            pid  = $child.Current.ProcessId
-                            rect = @{ x = $child.Current.BoundingRectangle.X; y = $child.Current.BoundingRectangle.Y; w = $child.Current.BoundingRectangle.Width; h = $child.Current.BoundingRectangle.Height }
+                            name = $p[0]
+                            type = $p[1]
+                            pid  = [int]$p[2]
+                            rect = @{ x = [int]$rect[0]; y = [int]$rect[1]; w = [int]$rect[2]; h = [int]$rect[3] }
                         }
-                        $child = $walker.GetNextSibling($child)
                     }
                     Reply @{ id = $req.id; ok = $true; desktop = $Name; windows = $items }
                 }
                 'input' {
                     $in = $req.input
-                    if ($in.op -eq 'click') { [Deputy.Desk2]::Click([int]$in.x, [int]$in.y, ($in.button -eq 'right')) }
-                    elseif ($in.op -eq 'type') { [Deputy.Desk2]::TypeText([string]$in.text) }
+                    if ($in.op -eq 'click') { [Deputy.Desk2]::ClickOn($handle, [int]$in.x, [int]$in.y, ($in.button -eq 'right')) }
+                    elseif ($in.op -eq 'type') { [Deputy.Desk2]::TypeOn($handle, [string]$in.text) }
                     else { throw "不支持的 input.op $($in.op)" }
                     Reply @{ id = $req.id; ok = $true }
                 }

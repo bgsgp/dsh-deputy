@@ -60,7 +60,7 @@ Windows 桌面对象是引用计数的：建它的进程一退出，桌面就没
 ```
 DesktopSession.open()  ──► 宿主: CreateDesktopW + SetThreadDesktop
 startApp(exe)          ──► 宿主: CreateProcessW(lpDesktop="WinSta0\deputy-x")
-capture()              ──► 宿主: BitBlt 取该桌面画面
+capture()              ──► 宿主: PrintWindow 逐窗口捕获该桌面画面
 tree()                 ──► 宿主: UIA RootElement（= 线程所在桌面）
 input(click/type)      ──► 宿主: SendInput
 close()                ──► 宿主退出 → 桌面销毁，不残留
@@ -133,7 +133,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `budget.mjs` 预算 | ✅ 实现 + 单测 | 三档降级 |
 | `runner.mjs` 闭环 | ✅ 实现 + 单测（注入式，无需 Windows） | 重试 / 熔断 |
 | `desktop.mjs` 虚拟桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭 |
-| `scripts/windows-desktop.ps1` | 🟡 原型 | 常驻宿主：建桌面 / 启动 / BitBlt / 取树 / SendInput，**未真机回归** |
+| `scripts/windows-desktop.ps1` | ✅ 真机验证（0.2.2-rc.5 宿主） | 常驻宿主：建桌面 / 启动 / 逐窗口 `PrintWindow` 捕获 / 取树；`SendInput` 仍待回归。已实测在隔离桌面打开 Edge 并拍到 B 站首页 |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 按 DSH 0.2.2 插件 ABI 机检（清单 / 工具 / 图片 / icon） |
 | `scripts/publish-npm.mjs` | ✅ 可用 | 舞台打包 + 直接 npm publish（标准三段版本） |
@@ -142,8 +142,9 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | 侧栏入口（`client.js`） | ✅ 真机验证（0.2.2-rc.5） | 侧栏「应用」一行「DSH操作电脑」+ 中央整页；`sidebar.panellist` / `main` 同 id 注册，`check-plugin` 防回退到 `shell.overlay` |
 | DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；4 个工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），桌面自动化仍待真机回归 |
 
-**已知未验证点**：x64 `INPUT` 40 字节对齐、隔离桌面 BitBlt 是否拍到硬件加速界面、
-`SetThreadDesktop` 在 PowerShell 进程里的成败、UAC/安全桌面的抢占。
+**已知未验证点**：x64 `INPUT` 40 字节对齐、`SendInput` 在非活动桌面的实际效果、
+UAC/安全桌面对隔离桌面的抢占。已解决：`SetThreadDesktop` 在 PowerShell 里必须放到
+"从未建过窗口"的后台 STA 线程；隔离桌面拍画面必须用逐窗口 `PrintWindow`（桌面级 BitBlt 全黑）。
 真机第一步先看 `deputy_desktop { op: "open" }` 返回的 `attached` 是否为 true。
 
 ---

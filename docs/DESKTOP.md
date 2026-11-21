@@ -21,7 +21,7 @@ JS 侧                         宿主进程（windows-desktop.ps1 host）
 DesktopSession.open()  ────────▼ CreateDesktopW + SetThreadDesktop
                                                     │
 startApp(exe)          ────────► CreateProcessW(lpDesktop="WinSta0\deputy-x")  ← 目标程序
-capture()              ────────► BitBlt 取该桌面画面  ──┐
+capture()              ────────► 逐窗口 PrintWindow 捕获 ──┐
 tree()                 ────────► UIA RootElement 取树   ├─ 都在同一桌面对象里
 input(click/type)      ────────► SendInput             ──┘
 close()                ────────► 宿主退出 → 桌面销毁
@@ -36,7 +36,7 @@ close()                ────────► 宿主退出 → 桌面销毁
 | 约束 | 后果 | 本项目的做法 |
 |---|---|---|
 | `SetThreadDesktop` 只能在线程**尚未创建任何窗口**前调用 | 中途切桌面一定失败 | 宿主进程启动时立即切，之后所有操作都在该桌面做 |
-| 非活动桌面不能用 `Windows.Graphics.Capture` | 拿不到硬件加速界面，Electron/WPF 可能拍成黑块 | 用 `BitBlt`（`GetDC(0)` + `CreateCompatibleBitmap`），接受这个损失 |
+| 非活动桌面不能用 `Windows.Graphics.Capture`；也没有 DWM 合成，桌面级 `BitBlt` 全黑 | 直接截桌面永远拿不到画面 | 逐窗口 `PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT=2)`：枚举该桌面可见窗口取最大者（可限定 pid），失败才回退桌面 BitBlt |
 | `CreateDesktopW` 用 `GENERIC_ALL` 需要管理员 | 普通权限直接被拒 | **显式报错**，绡不静默降级到主桌面 |
 
 第三条是刻意的：降级到主桌面意味着"用户正在用的界面被自动化乱动"，这比任务失败严重得多。
@@ -94,3 +94,23 @@ const deputy = createDeputy({
 ```
 
 感知、打分、拼图、ROI 校验全部不变——它们本来就不认识"桌面"是什么，这正是分层的价值。
+
+## 7. 宿主实现的四个坑（真机踩出来的）
+
+1. **`SetThreadDesktop` 要在无窗口线程里调**。PowerShell 主线程已经有控制台窗口，
+   切换返回 `ERROR_BUSY(170)`，之后所有 EnumWindows / UIA / 捕获都落在用户桌面上
+   （症状：树里出现用户自己的窗口，截图是用户桌面）。现在的做法是每个操作都扔进
+   一个新起的 STA 线程：先 `SetThreadDesktop`，再干活，join 后把异常抛回调用方。
+2. **非活动桌面必须逐窗口 `PrintWindow`**。没有 DWM 合成，`GetDC(NULL)` + `BitBlt`
+   只能得到纯黑图。`PrintWindow(..., PW_RENDERFULLCONTENT=2)` 会让窗口自己绘制到内存 DC，
+   Electron/Chromium 也能出画面。真机实测：隔离桌面里的 Edge 打开 B 站，
+   取到 1946×1106 的完整页面帧。
+3. **`CreateProcessW` 的 exe 要加引号**。命令行是整串字符串再解析的，
+   `C:/Program Files (x86)/.../msedge.exe` 不加引号会被按空格拆开，
+   浏览器把 `files`、`(x86)` 当网址打开（表现为 `DNS_PROBE_FINISHED_NXDOMAIN`）。
+4. **脚本得是 UTF-8 with BOM**。UTF-8 无 BOM 时 Windows PowerShell 按 CP936 解码，
+   中文注释尾部的字节会吞掉换行，后面的 C# 成员被并进注释，报
+   `类、结构或接口成员声明中的标记"="无效`。另外 `Add-Type` 不要同时给
+   `-TypeDefinition` 和 `-Namespace`/`-Name`（参数集冲突，报 `AmbiguousParameterSet`）。
+
+诊断入口：`{ "op": "debug" }` 返回线程所在桌面名、桌面句柄、该桌面窗口数、UIA 根子元素数。
