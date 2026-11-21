@@ -82,7 +82,7 @@ dsh plugin --profile web add dsh-deputy
 
 ## 对照豆包那套「截图 → 点击」闭环
 
-豆包（字节 UI-TARS 系）自述的实现有六条设计。对照到本插件：
+豆包（字节 UI-TARS 系）自述的实现有六条设计；本插件在它们之上又加了观察层（⑦）。对照到本插件：
 
 | 豆包的规矩 | 本插件现状 |
 |---|---|
@@ -92,9 +92,10 @@ dsh plugin --profile web add dsh-deputy
 | ④ 登录、验证码、扫码、MFA 一律交人 | 🟡 只做到"失败不硬撑"：动作校验不过就停、回 `verdict`；**没有**自动识别登录页并交还控制权（见 [docs/ROADMAP.md](docs/ROADMAP.md)） |
 | ⑤ 应用必须按开始菜单清单的精确名称启动 | ✅ `deputy_desktop { op: "apps" }` 枚举开始菜单（`.lnk`/`.url` + `shell:AppsFolder` 打包应用，真机 207 项），`op: "launch-app", name: "Google Chrome"` 只认精确名称；找不到回 `APP_NOT_FOUND` + 候选名 |
 | ⑥ 落盘类操作用文件系统回读校验 | ✅ `deputy_act` 的 `verifyFile: { path, minBytes }` 动作后立刻回读磁盘；文件是最终裁判（见 [docs/DESKTOP.md](docs/DESKTOP.md#61-落盘回读保存类动作的最终裁判)） |
+| ⑦ 观察先取控件树，不靠像素猜控件 | ✅ `deputy_see` 读 UIA 语义树（类型/名字/模式/路径），`deputy_act` 的 `kind: "uia"` 直接按路径 invoke/setValue；拿不到语义才退回像素（见 [docs/DESKTOP.md](docs/DESKTOP.md#62-观察层deputy_see-与语义动作)） |
 
-本插件不做豆包那套「模型看像素猜控件」：能走 UIA 语义（`InvokePattern`/`ValuePattern`）就走语义，
-键鼠是兜底；真正的取舍写在 [docs/DESIGN.md](docs/DESIGN.md)。
+本插件的取舍是「先语义、后像素」：`deputy_see` 读 UIA 控件树（`InvokePattern`/`ValuePattern`），能按控件路径走就走；
+拿不到语义（Chromium/UWP）才退回像素 + 键鼠。真正的取舍写在 [docs/DESIGN.md](docs/DESIGN.md)。
 
 ## 为什么要"常驻宿主"
 
@@ -139,7 +140,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 56 项自检：算法 / 闭环 / 桌面状态机与模式切换 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
+node test/run-tests.mjs        # 67 项自检：算法 / 闭环 / 桌面状态机与模式切换 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -160,18 +161,24 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 客户端发现（`exactPackageSpecifier` 遇到子路径直接返回 `undefined`），没有这条 row，`client.js`
 就永远进不了 `__DSH_BOOT__`，侧栏「DSH操作电脑」整行不会出现。它不带 id，所以插件管理器的
 「包含的组件」仍然是两行。
-**桌面（os）四个工具**
+**桌面（os）五个工具**
 
 | 工具 | 作用 | 返回 |
 |---|---|---|
 | `deputy_sense` | 采一帧并打分 | `{score, tier, box, hashDistance}` |
-| `deputy_act` | 执行动作 + ROI 校验；保存类动作传 `verifyFile` 做磁盘回读 | `{ok, verdict, inside, outside, retries, file?}` |
+| `deputy_see` | 看窗口与控件树（UIA 语义）：`op: "windows"` / `op: "tree"` | `{kind, count, text, lines, hwnd?, window?, truncated?}` |
+| `deputy_act` | 执行动作 + ROI 校验；`kind: "uia"` 按控件路径走语义动作；保存类动作传 `verifyFile` 做磁盘回读 | `{ok, verdict, inside, outside, retries, method?, file?}` |
 | `deputy_sheet` | 把缓冲帧压成 4×4 送出 | `{frames, budget, image}` + image content block |
 | `deputy_desktop` | 桌面会话：`status/open/apps/launch-app/launch/tree/close` | 会话状态 / pid / 开始菜单应用清单 / 窗口树 |
 
 保存类动作必须回读磁盘，别只信像素：`deputy_act({ kind: 'input', payload: { op: 'key', combo: 'Ctrl+S' },
 verifyFile: { path: 'D:/out/report.xlsx', minBytes: 1024 } })`。文件存在且够大才算保存成功 —— 见
 [docs/DESKTOP.md](docs/DESKTOP.md#61-落盘回读保存类动作的最终裁判)。
+
+先看再动：`deputy_see({ op: 'windows' })` 找窗口，`deputy_see({ op: 'tree', title: 'XXX' })` 拿控件行和 `@1.0.2` 路径，
+再 `deputy_act({ kind: 'uia', payload: { title: 'XXX', ref: { path: [1, 0] }, action: 'invoke' } })`；
+回包里的 `method` 说明走的是 UIA 模式、窗口消息还是坐标兜底。Chromium/UWP 的限制见
+[docs/DESKTOP.md](docs/DESKTOP.md#62-观察层deputy_see-与语义动作)。
 
 **浏览器（browser）五个工具**（完整 CDP 实现，细节见 [docs/BROWSER.md](docs/BROWSER.md)；1.3.39 待真机回归）
 

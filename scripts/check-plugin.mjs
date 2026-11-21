@@ -212,7 +212,8 @@ const sink = registerTools({ tools: { register: (def) => registered.push(def) } 
 sink.length === 0 ? ok(`${registered.length} 个工具均已注册`) : bad(`${sink.length} 个工具未注册`)
 registered.length === specs.length ? ok('注册数量与 toolSpecs 一致') : bad('注册数量与 toolSpecs 不一致')
 
-const CONCURRENCY = { deputy_sense: true, deputy_act: false, deputy_sheet: false, deputy_desktop: false }
+const CONCURRENCY = {
+  deputy_see: true, deputy_sense: true, deputy_act: false, deputy_sheet: false, deputy_desktop: false }
 for (const def of registered) {
   const valid =
     def.output?.schema?.type === 'object' &&

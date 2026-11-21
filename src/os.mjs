@@ -1,7 +1,7 @@
 // dsh-deputy/os 组件入口：隔离桌面（虚拟桌面）这一半的能力。
 //
 // 这个包有两个 Cordis 组件（插件管理器里显示成两行）：
-//   dsh-deputy/os      —— 本文件：虚拟桌面 + 桌面面板 + deputy_* 四个工具
+//   dsh-deputy/os      —— 本文件：虚拟桌面 + 桌面面板 + deputy_* 五个工具
 //   dsh-deputy/browser —— src/browser.mjs：浏览器操作骨架（CDP daemon，见 docs/BROWSER.md）
 // 两者同一进程、同一份模块实例，状态点通过 src/status.mjs 的总线合成。
 //
@@ -25,6 +25,8 @@ import { setOsStatus } from './status.mjs'
 import { toParameters, text, registerTools } from './registry.mjs'
 import * as A from './action.mjs'
 import { verifyFile, mergeVerdict } from './verify-file.mjs'
+import { UiaBridge } from './uia-bridge.mjs'
+import { describe, SEE } from './see.mjs'
 
 // 兼容旧的 import 路径（测试与 MCP 形态仍从 ./src/index.mjs 取这两个）
 export { toParameters, registerTools } from './registry.mjs'
@@ -95,10 +97,12 @@ const imageSchema = {
 }
 
 /**
- * 描述给模型的 4 个工具：看、做、拼图、桌面会话。
+ * 描述给模型的 5 个工具：像素看、控件树看、做、拼图、桌面会话。
  * options.saveImage 由 apply() 注入（ctx.attachments.saveImage），缺省时拼图只回文本。
  */
 export function toolSpecs(deputy, session, options = {}) {
+  // 观察层的 UIA 桥是「一次性进程」式的（见 src/uia-bridge.mjs 头注释），按需建一个就够
+  const bridge = options.bridge ?? (state.bridge ||= new UiaBridge())
   return [
     {
       name: 'deputy_sense',
@@ -126,9 +130,58 @@ export function toolSpecs(deputy, session, options = {}) {
       handler: async () => deputy.observe(),
     },
     {
+      name: 'deputy_see',
+      description:
+        '看屏幕上的窗口和控件（UIA 语义树）。op=windows 列出可见窗口；op=tree 取某个窗口的控件树（带路径、名字、可用模式）。拿到 ref.path 后用 deputy_act 的 kind=uia 去点/填。',
+      // 只读观察，可以和别的工具并发
+      concurrencySafe: true,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          op: { type: 'string', enum: ['windows', 'tree'] },
+          hwnd: { type: 'number', description: '窗口句柄（windows 结果里的 #数字）' },
+          title: { type: 'string', description: '按标题找窗口（精确优先，其次包含）' },
+          process: { type: 'string', description: '按进程名找窗口，例如 notepad' },
+          depth: { type: 'number', description: `控件树深度（默认 ${SEE.depth}）` },
+          maxNodes: { type: 'number', description: `控件树节点上限（默认 ${SEE.maxNodes}）` },
+        },
+        required: ['op'],
+      },
+      outputSchema: {
+        type: 'object',
+        additionalProperties: true,
+        required: ['kind', 'count'],
+        properties: {
+          kind: { type: 'string' },
+          count: { type: 'number' },
+          text: { type: 'string' },
+          lines: { type: 'array', items: { type: 'string' } },
+          truncated: { type: 'boolean' },
+          hwnd: { type: 'number' },
+          window: { type: 'string' },
+          foreground: { type: 'string' },
+        },
+      },
+      render: (_args, v) => text(String(v?.text ?? '（没有内容）')),
+      handler: async (args) => {
+        const maxNodes = args.maxNodes ?? SEE.maxNodes
+        if (args.op === 'windows') return describe(await bridge.windows(), { maxNodes })
+        const target = {}
+        if (typeof args.hwnd === 'number' && args.hwnd > 0) target.hwnd = args.hwnd
+        else if (args.title) target.title = args.title
+        else if (args.process) target.process = args.process
+        else throw new Error('tree 需要 hwnd / title / process 之一（先 op=windows 看清单）')
+        target.depth = args.depth ?? SEE.depth
+        target.maxNodes = maxNodes
+        return describe(await bridge.see(target), { maxNodes })
+      },
+    },
+    {
       name: 'deputy_act',
       description:
-        '在隔离桌面里执行一个动作（uia/input/shell/wait），自动校验它是否真的生效（ROI 三分）；保存类动作传 verifyFile 做磁盘回读。',
+        '执行一个动作（uia/input/shell/wait），自动校验它是否真的生效（ROI 三分）；保存类动作传 verifyFile 做磁盘回读。',
+        // user 模式下的 uia 动作走一次性 UIA 桥（deputy_see 给出的 ref.path 直接可用）：
+        // payload 形如 { hwnd: 123, ref: { path: [1, 0] }, action: 'invoke'|'setValue'|'click'|'focus', text }
       inputSchema: {
         type: 'object',
         properties: {
@@ -159,6 +212,7 @@ export function toolSpecs(deputy, session, options = {}) {
         properties: {
           ok: { type: 'boolean' },
           verdict: { type: 'string' },
+          method: { type: 'string' },
           retries: { type: 'number' },
           file: {
             type: 'object',
@@ -180,6 +234,30 @@ export function toolSpecs(deputy, session, options = {}) {
         return text(`动作${v?.ok ? '生效' : '未生效'}（${v?.verdict ?? 'n/a'}，重试 ${v?.retries ?? 0}）${file}`)
       },
       handler: async (args) => {
+        const target = args.payload ?? {}
+        // user 模式没有常驻宿主进程，UIA 动作走一次性 PowerShell 桥（豆包的做法：
+        // 语义优先，控件不给模式才落回消息/坐标）。isolated 桌面仍走宿主的线程内 UIA。
+        const mode = DESKTOP_MODES.includes(config.desktop?.mode) ? config.desktop.mode : 'user'
+        const canBridge =
+          args.kind === A.KIND.UIA &&
+          mode === 'user' &&
+          (typeof target.hwnd === 'number' || Boolean(target.title) || Boolean(target.process))
+        if (canBridge) {
+          const r = await bridge.act({
+            hwnd: target.hwnd,
+            title: target.title,
+            process: target.process,
+            path: target.ref?.path ?? target.path,
+            action: target.action ?? 'invoke',
+            text: target.text,
+          })
+          // 后端会说明自己用了哪条路（invoke / wm-settext / bm-click / coordinate），
+          // 这比一个笼统的 ok 有用：method=coordinate 意味着是靠前台校验兜住的。
+          const value = { ok: r?.ok !== false, verdict: `uia:${r?.method ?? 'act'}`, retries: 0 }
+          if (r?.method) value.method = String(r.method)
+          if (!args.verifyFile) return value
+          return mergeVerdict(value, verifyFile(args.verifyFile))
+        }
         const result = await deputy.step(A.action(args.kind, args.payload, { expect: args.expect }))
         // 没有 verifyFile 就还是纯像素闭环；给了就由文件系统做最终裁判。
         if (!args.verifyFile) return result

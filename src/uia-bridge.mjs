@@ -22,7 +22,8 @@ export class UiaBridge {
     return new Promise((resolve, reject) => {
       const ps = spawn(
         'powershell.exe',
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', this.script],
+        // -STA 不能省：UIA 客户端要在 STA 线程上用（MTA 下拿控件树常常是空树或超时）
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', this.script],
         { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
       )
       let out = ''
@@ -39,7 +40,17 @@ export class UiaBridge {
       })
       ps.on('close', (code) => {
         clearTimeout(timer)
-        if (code !== 0) return reject(new Error(`UIA 后端退出码 ${code}: ${err.trim().slice(0, 400)}`))
+        if (code !== 0) {
+          // 后端失败时也会吐一行 JSON（{ok:false,error}）；那条 error 比 stderr 有用得多
+          let detail = null
+          try {
+            const parsed = JSON.parse(out)
+            if (parsed && parsed.error) detail = String(parsed.error)
+          } catch {
+            /* 不是 JSON 就退回 stderr */
+          }
+          return reject(new Error(`UIA 后端退出码 ${code}: ${detail ?? err.trim().slice(0, 400)}`))
+        }
         try {
           resolve(JSON.parse(out))
         } catch {
@@ -74,6 +85,32 @@ export class UiaBridge {
 
   capture({ desktop = null, region = null } = {}) {
     return this.call({ op: 'capture', desktop, region })
+  }
+
+  /** 当前桌面上的可见顶层窗口（观察层的第一步：先知道有什么）。 */
+  windows() {
+    return this.call({ op: 'windows' })
+  }
+
+  /** 取一个窗口的控件树；定位窗口用 hwnd / title / process 之一。 */
+  see({ hwnd, title, process: proc, depth, maxNodes } = {}) {
+    const payload = { op: 'tree' }
+    if (typeof hwnd === 'number' && hwnd > 0) payload.hwnd = hwnd
+    if (title) payload.title = title
+    if (proc) payload.process = proc
+    if (typeof depth === 'number') payload.depth = depth
+    if (typeof maxNodes === 'number') payload.maxNodes = maxNodes
+    return this.call(payload)
+  }
+
+  /** 语义动作：按控件路径 invoke/setValue/click/focus。 */
+  act({ hwnd, title, process: proc, path, action, text: value } = {}) {
+    const payload = { op: 'act', action: action ?? 'invoke', ref: { path: Array.isArray(path) ? path : [] } }
+    if (typeof hwnd === 'number' && hwnd > 0) payload.hwnd = hwnd
+    if (title) payload.title = title
+    if (proc) payload.process = proc
+    if (value != null) payload.text = String(value)
+    return this.call(payload)
   }
 }
 

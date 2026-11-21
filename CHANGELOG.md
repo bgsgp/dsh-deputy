@@ -2,6 +2,17 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.49
+
+### 观察层：先看控件树，再决定怎么动（`deputy_see`）
+- 新增 `deputy_see`：`op: "windows"` 列出可见顶层窗口，`op: "tree"` 取某个窗口的 UIA 控件树；每行带类型、名字、`aid`、可用模式（Invoke/Value/Toggle…）、路径 `@1.0.2`，以及「密码框/禁用/不可见」旗标。
+- 新增 `scripts/windows-uia.ps1`（一次性进程，UTF-8 BOM + CRLF）：`windows` / `tree` / `act` / `capture`，输出统一走 UTF-8 字节流，中文标题不乱码；排版在 `src/see.mjs`（纯函数，可单测），桥在 `src/uia-bridge.mjs`（`-STA`）。
+- `deputy_act` 的 `kind: "uia"` 在 `user` 模式下改走这条桥：`payload: { hwnd|title|process, ref: { path }, action: "invoke"|"setValue"|"click"|"focus", text }`；回包新增 `method`，说明实际走的是 `invoke` / `bm-click` / `wm-settext` / `coordinate`。
+- 语义优先：UIA 模式（`Invoke`→`Toggle`→`SelectionItem`→`ExpandCollapse`、`ValuePattern`）→ 窗口消息（按类名 `BM_CLICK` / `WM_SETTEXT`）→ 坐标点击；坐标点击前校验顶层窗口 `== GetForegroundWindow`，否则抛 `NOT_FOREGROUND`（防止把字打进别的窗口）。
+- 已知限制（真机实测，如实记录）：Chromium 系窗口渲染进程 a11y 默认关，树里只有标题栏，这类窗口请走 `browser_*` 的 CDP 工具；UWP（设置/计算器）`FromHandle` 只回空 `Pane`，暂不支持；WinForms 子控件全报 `Pane`，靠类名消息兜底（实测可用）。
+- 端到端验证（走真实工具层，`scripts/see-e2e.mjs` + WinForms 夹具 `scripts/uia-fixture.ps1`）：`deputy_see tree` → `act setValue`（`wm-settext`）→ `act invoke 确定`（`bm-click`）→ 回读文件得到 `clicked:deputy tool ok 7`。
+- 自检 61 → 67 项（观察层 6 项）。
+
 ## 1.3.48
 
 ### 落盘回读：保存类动作由文件系统做最终裁判

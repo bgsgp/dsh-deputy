@@ -107,6 +107,7 @@ dsh plugin --profile web add .
 |---|---|
 | `deputy_desktop` | `{ "op": "status" }` → `state: "idle"` |
 | `deputy_sense` | 采一帧打分（未开桌面会报错） |
+| `deputy_see` | `{ "op": "windows" }` → 可见窗口清单；`{ "op": "tree", "title": "记事本" }` → 控件树 |
 | `deputy_act` | 执行动作 + ROI 校验（保存类动作带 `verifyFile` 回读磁盘） |
 | `deputy_sheet` | 返回一张 4×4 联系表的 image 内容块（`attachments.saveImage`） |
 

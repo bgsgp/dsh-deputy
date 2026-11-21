@@ -129,6 +129,9 @@ idle ──open()──► opened ──startApp()──► running ──close(
 副作用：PowerShell 自身的隐藏控制台窗口也会出现在树里（`pid` 字段可用于过滤）——
 这是原型阶段的已知噪声，生产版应换成无窗口的编译 worker。
 
+观察层（`deputy_see` / `kind: "uia"` 动作）在 `user` 模式下**不**走宿主线程内 UIA：真实桌面没有 `SetThreadDesktop` 的需求，
+每次起一个一次性 `scripts/windows-uia.ps1` 进程（`-STA`）更稳 —— 卡死也只卡那一次调用。细节见 6.2。
+
 ## 5. 与"豆包式电脑操作"的差距清单
 
 `user` 模式已经对齐的部分：**整屏截图、在你当前会话里注入合成事件、点击会切前台** —— 这正是豆包/UI-TARS
@@ -191,6 +194,33 @@ deputy_act({
 | `mergeVerdict(pixel, file)` | 合成最终结论：硬失败（`halt`/`error`）保留原判不翻案；像素 `no-effect` 但文件已落盘 → 成功；像素成功但文件不在 → 失败 |
 
 回包里的 `file` 字段是给模型看的证据，`render()` 会把它压成「文件已落盘 · 12345B」。
+
+## 6.2 观察层：`deputy_see` 与语义动作
+
+`deputy_sense` 给的是像素（变化分数），`deputy_see` 给的是**语义**：窗口清单与某个窗口的控件树。
+
+```js
+deputy_see({ op: 'windows' })                        // #123 pid 456 notepad "记事本" [前台] 800x600
+deputy_see({ op: 'tree', title: '记事本', depth: 4 })  // [Edit] "正文" aid=15 ... @1.0.2
+deputy_act({
+  kind: 'uia',
+  payload: { title: '记事本', ref: { path: [1, 0, 2] }, action: 'setValue', text: 'hello' },
+})
+```
+
+- 排版在 `src/see.mjs`（纯函数，无 Windows 依赖，单测覆盖）；桥在 `src/uia-bridge.mjs`；后端是 `scripts/windows-uia.ps1`。
+- 动作顺序：UIA 模式（`Invoke`/`Toggle`/`SelectionItem`/`ExpandCollapse`、`ValuePattern`）→ 窗口消息（按类名 `BM_CLICK` / `WM_SETTEXT`）→ 坐标点击（先校验前台窗口，否则 `NOT_FOREGROUND`）。
+- 回包 `method` 是证据：`invoke` / `bm-click` / `wm-settext` / `coordinate`；`method: "coordinate"` 意味着这次是靠前台校验兜住的，值得重看一眼再连点。
+
+已知限制（真机实测，不要当成 bug 反复试）：
+
+| 对象 | 现象 | 现状 |
+|---|---|---|
+| Chromium 系（Edge/Chrome/Electron） | 渲染进程 a11y 默认关，树里只有标题栏三个按钮 | 走 `browser_*`（CDP） |
+| UWP（设置、计算器） | `AutomationElement.FromHandle` 只回空 `Pane` | 暂不支持，退回像素 |
+| WinForms 老控件 | 子控件全报 `ControlType.Pane`、无可用模式 | 已按类名 `BM_CLICK` / `WM_SETTEXT` 兜底，实测可用 |
+
+验证入口：`scripts/uia-fixture.ps1`（WinForms 夹具）+ `scripts/see-e2e.mjs`（走真实工具层的端到端）+ `scripts/uia-probe.mjs`（手工探针）。
 
 ## 7. 宿主实现的五个坑（真机踩出来的）
 

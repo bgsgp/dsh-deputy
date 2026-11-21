@@ -18,6 +18,7 @@ import { runSteps } from '../src/browser/act.mjs'
 import { BrowserDaemon } from '../src/browser/daemon.mjs'
 import { waitForLoad } from '../src/browser/wait.mjs'
 import { verifyFile, mergeVerdict, FILE_VERDICT } from '../src/verify-file.mjs'
+import { SEE, shortName, matchWindow, flattenTree, formatNode, formatWindows, describe } from '../src/see.mjs'
 
 const PASS = []
 const FAILED = []
@@ -375,12 +376,12 @@ await test('窗口帧坐标在 input 时平移为桌面绝对坐标', async () =
 })
 
 await test('工具输出：跳过采样与拼图预算耗尽均符合声明且不抛异常', async () => {
-  const sense = toolSpecs({ observe: async () => ({ skipped: 'budget' }) }, {})[0]
+  const sense = toolSpecs({ observe: async () => ({ skipped: 'budget' }) }, {})[0] // deputy_sense
   const skipped = await sense.handler()
   assert.equal(skipped.skipped, 'budget')
   assert.match(sense.render({}, skipped)[0].text, /未出图/)
 
-  const sheet = toolSpecs({ flush: async () => ({ dropped: 'sheet-budget' }) }, {})[2]
+  const sheet = toolSpecs({ flush: async () => ({ dropped: 'sheet-budget' }) }, {})[3] // deputy_sheet（前面加了 deputy_see）
   const dropped = await sheet.handler({ reason: 'test' })
   assert.deepEqual(dropped, { frames: 0, dropped: 'sheet-budget' })
   assert.equal(sheet.outputSchema.properties.budget.type, 'object')
@@ -399,7 +400,7 @@ await test('工具输出：拼图以 image block 返回，附件是 saveImage �
         return { attachmentId: 'att_1', mediaType: 'image/png', bytes: 4, width: 8, height: 8, name: input.name }
       },
     },
-  )[2]
+  )[3]
   const value = await sheet.handler({ reason: 'test' })
   assert.equal(saved.length, 1)
   assert.equal(saved[0].mediaType, 'image/png')
@@ -412,7 +413,7 @@ await test('工具输出：拼图以 image block 返回，附件是 saveImage �
 })
 
 await test('工具输出：attachments 不可用时拼图只回文本，不抛异常', async () => {
-  const sheet = toolSpecs({ flush: async () => ({ frames: [{}], budget: {}, png: Buffer.from([1]) }) }, {})[2]
+  const sheet = toolSpecs({ flush: async () => ({ frames: [{}], budget: {}, png: Buffer.from([1]) }) }, {})[3]
   const value = await sheet.handler({ reason: 'x' })
   assert.equal(value.image, undefined)
   assert.deepEqual(sheet.render({}, value).map((b) => b.type), ['text'])
@@ -423,10 +424,11 @@ await test('注册：只走 0.2.x register(defineTool)，只读工具标并发�
   const registered = []
   const sink = registerTools({ tools: { register: (def) => registered.push(def) } }, specs)
   assert.equal(sink.length, 0)
-  assert.equal(registered.length, 4)
+  assert.equal(registered.length, 5)
   assert.equal(typeof registered[0].isConcurrencySafe, 'function')
   assert.equal(registered[0].isConcurrencySafe({}), true)
-  assert.equal(registered[1].isConcurrencySafe, undefined)
+  // 索引 1 是只读的 deputy_see；deputy_act 不能并发
+  assert.equal(registered.find((d) => d.name === 'deputy_act').isConcurrencySafe, undefined)
   for (const def of registered) {
     assert.equal(def.output.schema.type, 'object')
     assert.equal(typeof def.output.render, 'function')
@@ -435,12 +437,12 @@ await test('注册：只走 0.2.x register(defineTool)，只读工具标并发�
   }
   // 缺 tools 服务时交回 spec，而不是静默吞掉
   const orphan = registerTools({}, specs)
-  assert.equal(orphan.length, 4)
+  assert.equal(orphan.length, 5)
 })
 
 await test('工具 schema：output 用 required 数组、参数表 object 显式 additionalProperties', async () => {
   const specs = toolSpecs({ observe: async () => ({}) }, {})
-  const requiredRoots = { deputy_act: ['ok'], deputy_sheet: ['frames'], deputy_desktop: ['state'] }
+  const requiredRoots = { deputy_act: ['ok'], deputy_sheet: ['frames'], deputy_desktop: ['state'], deputy_see: ['kind', 'count'] }
   const assertNoInlineRequired = (node, path) => {
     if (!node || typeof node !== 'object') return
     for (const [key, child] of Object.entries(node)) {
@@ -1038,6 +1040,108 @@ await test('包根锚点：index.mjs 是 name=dsh-deputy 的空组件，老路�
   assert.match(patch, /id: dsh-deputy-browser/, 'patch 必须有 browser 组件 row')
 })
 
+await test('观察层 see：UIA 的程序化名压成短名', () => {
+  assert.equal(shortName('ControlType.Button'), 'Button')
+  assert.equal(shortName('ControlType.Window'), 'Window')
+  assert.equal(shortName('InvokePatternIdentifiers.Invoke'), 'Invoke')
+  assert.equal(shortName('ValuePatternIdentifiers.Value'), 'Value')
+  assert.equal(shortName(null), '')
+})
+
+await test('观察层 see：挑窗口先 hwnd、再标题、再进程名，同分前台优先', () => {
+  const wins = [
+    { hwnd: 11, title: '设置', process: 'SystemSettings', focused: false },
+    { hwnd: 22, title: '记事本 - 未命名', process: 'notepad', focused: true },
+    { hwnd: 33, title: '记事本 - 已保存', process: 'notepad', focused: false },
+    { hwnd: 44, title: '设置', process: 'ApplicationFrameHost', focused: false },
+  ]
+  assert.equal(matchWindow(wins, 33).hwnd, 33)
+  assert.equal(matchWindow(wins, '33').hwnd, 33)
+  assert.equal(matchWindow(wins, '设置').hwnd, 11, 'ApplicationFrameHost 只是外框，同名时真窗口的标题精确分更高')
+  // 两个「记事本 - ...」都是标题包含，同分时前台那个赢
+  assert.equal(matchWindow(wins, '记事本').hwnd, 22)
+  assert.equal(matchWindow(wins, 'notepad').hwnd, 22)
+  assert.equal(matchWindow(wins, '没有这个窗口'), null)
+  assert.equal(matchWindow([], '设置'), null)
+})
+
+await test('观察层 see：控件树展开成带路径的行，空节点被跳过', () => {
+  const tree = {
+    name: '窗口',
+    type: 'ControlType.Window',
+    children: [
+      null,
+      { name: '确定', type: 'ControlType.Button', patterns: ['InvokePatternIdentifiers.Invoke'] },
+      { name: '面板', type: 'ControlType.Pane', children: [{ name: '输入框', type: 'ControlType.Edit' }] },
+    ],
+  }
+  const flat = flattenTree(tree)
+  assert.equal(flat.total, 4)
+  assert.equal(flat.truncated, false)
+  assert.deepEqual(flat.nodes.map((n) => n.path), [[], [1], [2], [2, 0]])
+  assert.deepEqual(flat.nodes.map((n) => n.depth), [0, 1, 1, 2])
+  const cut = flattenTree(tree, { maxNodes: 2 })
+  assert.equal(cut.nodes.length, 2)
+  assert.equal(cut.truncated, true)
+})
+
+await test('观察层 see：一行摘要带类型、名字、模式、旗标和路径', () => {
+  const line = formatNode({
+    path: [1, 0],
+    depth: 2,
+    node: {
+      name: '确定  ',
+      type: 'ControlType.Button',
+      aid: 'okBtn',
+      patterns: ['InvokePatternIdentifiers.Invoke'],
+      enabled: false,
+      offscreen: true,
+    },
+  })
+  assert.match(line, /^ {4}\[Button\] "确定"/)
+  assert.match(line, /aid=okBtn/)
+  assert.match(line, /Invoke/)
+  assert.match(line, /\(禁用\/不可见\)/)
+  assert.match(line, /@1\.0$/)
+  const anonymous = formatNode({ path: [], depth: 0, node: { type: 'ControlType.Pane', password: true } })
+  assert.match(anonymous, /\(无名\)/)
+  assert.match(anonymous, /密码框/)
+  assert.match(anonymous, /@root$/)
+})
+
+await test('观察层 see：窗口列表成文本，前台和尺寸都标出来', () => {
+  const lines = formatWindows([
+    { hwnd: 11, pid: 4, process: 'explorer', title: 'Program Manager', focused: false, rect: { w: 1280, h: 720 } },
+    { hwnd: 22, pid: 9, process: 'notepad', title: '  记事本  ', focused: true },
+  ])
+  assert.equal(lines.length, 2)
+  assert.match(lines[0], /^#11 pid 4 explorer "Program Manager" 1280x720$/)
+  assert.match(lines[1], /\[前台\]$/)
+  assert.match(lines[1], /"记事本"/)
+  assert.equal(formatWindows([], {}).length, 0)
+})
+
+await test('观察层 see：描述结果统一成 kind/count/text，且不带 null', () => {
+  const windows = describe({
+    windows: [{ hwnd: 22, pid: 9, process: 'notepad', title: '记事本', focused: true }],
+    foreground: { hwnd: 22, title: '记事本' },
+  })
+  assert.equal(windows.kind, 'windows')
+  assert.equal(windows.count, 1)
+  assert.equal(windows.foreground, '记事本')
+  assert.match(windows.text, /记事本/)
+  const empty = describe({ windows: [] })
+  assert.equal(empty.count, 0)
+  assert.match(empty.text, /没有可见的顶层窗口/)
+  const tree = describe({ window: { hwnd: 22, title: '记事本' }, node: { name: '记事本', type: 'ControlType.Window', children: [] } })
+  assert.equal(tree.kind, 'tree')
+  assert.equal(tree.hwnd, 22)
+  assert.equal(tree.window, '记事本')
+  assert.equal(tree.count, 1)
+  for (const v of [windows, empty, tree]) {
+    for (const [k, val] of Object.entries(v)) assert.notEqual(val, null, `${k} 不能是 null（output.schema 不接受）`)
+  }
+})
 await test('落盘回读：存在且够大的文件才算写出来了', () => {
   const dir = mkdtempSync(join(tmpdir(), 'deputy-verify-'))
   const file = join(dir, 'report.txt')
@@ -1086,7 +1190,7 @@ await test('落盘回读：文件是保存类动作的最终裁判（双向覆�
 })
 
 await test('deputy_act 参数表暴露 verifyFile（path 必填，minBytes 可选）', () => {
-  const act = toolSpecs({ observe: async () => ({}) }, {})[1]
+  const act = toolSpecs({ observe: async () => ({}) }, {})[2] // deputy_act（0=sense，1=see）
   const spec = act.inputSchema.properties.verifyFile
   assert.ok(spec, 'deputy_act 必须声明 verifyFile')
   assert.equal(spec.type, 'object')
@@ -1102,7 +1206,7 @@ await test('deputy_act 传 verifyFile 时用磁盘回读改写 verdict', async (
   const file = join(dir, 'out.txt')
   writeFileSync(file, 'x'.repeat(32))
   const fake = { step: async () => ({ ok: false, verdict: 'no-effect', inside: 0, outside: 0, retries: 0 }) }
-  const act = toolSpecs(fake, {})[1]
+  const act = toolSpecs(fake, {})[2]
   const res = await act.handler({ kind: 'input', payload: { op: 'key', combo: 'Ctrl+S' }, verifyFile: { path: file, minBytes: 16 } })
   assert.equal(res.ok, true)
   assert.equal(res.verdict, 'file-ok')
