@@ -9,6 +9,10 @@
 # 因此不需要构建授权，也不需要 allowBuilds。
 
 - insert:
+    # 包根锚点：没有 id，所以不出现在插件管理器的组件列表里。
+    # 作用只有一个：让 client-modules 的 exactPackageSpecifier('dsh-deputy') 命中包根，
+    # 从而把 client.js 塞进 __DSH_BOOT__ 模块图（侧栏「DSH操作电脑」入口靠它）。
+    - name: 'dsh-deputy'
     - id: dsh-deputy-os
       name: 'dsh-deputy/os'
       config:

@@ -2,6 +2,25 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.35
+
+### 侧栏入口消失的真机根因（包根锚点 row）
+- 现象：拆成 `dsh-deputy/os` + `dsh-deputy/browser` 之后，重启 DSH，侧栏「DSH操作电脑」整行消失。
+- 根因在 0.2.2 的 `@deepseek-ai/dsh-client-modules`：客户端把 Loader 行的 `options.name`
+  交给 `resolveMeta` → `locatePkgJson`，那里用 `exactPackageSpecifier` 校验——它只认
+  `@scope/name` 或不含 `/`、`:` 的包根名，**子路径一律返回 `undefined`**
+  （源码注释：builtins 与 subpath entries "land here — not a client row"）。于是
+  `name: 'dsh-deputy/os'` 这些 row 都不产生客户端行，`client.js` 从不被加载，
+  `window.__DSH_BOOT__.entries` 里也没有 `dsh-deputy`。
+- 修法：`cordis.patch.yml` 增加一条**不带 id** 的包根 row `name: 'dsh-deputy'`，由它触发
+  客户端发现；不带 id 所以插件管理器「包含的组件」仍是两行（`dsh-deputy/os` / `dsh-deputy/browser`）。
+  `src/index.mjs` 相应改成空组件：`name = 'dsh-deputy'`、`inject = []`、`apply() {}`，
+  但继续 re-export `toolSpecs` / `registerTools` / `toParameters`，老路径与测试照旧。
+- 验证：测试 profile 冷启动 → `__DSH_BOOT__.entries` 出现
+  `{id:'dsh-deputy', url:'plugins/??dsh-deputy/client.js&rev=…'}`，侧栏出现「DSH操作电脑」
+  （图标 + 状态点），点开中央面板正常出页面；`check-plugin` 增加锚点断言（缺锚点直接失败），
+  自检 33 → 34 项。
+
 ## 1.3.34
 
 ### 侧栏状态点挪到图标旁边

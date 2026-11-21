@@ -281,6 +281,14 @@ for (const c of COMPONENTS) {
 }
 patchText.match(/^\s*-\s*insert:/gm)?.length === 1 ? ok('patch 只有一条 insert（两个组件放同一条）') : warn('patch 的 insert 条目数量不是 1')
 
+// 8b2. 包根锚点：client-modules 只对「loader row 的 name 恰好等于包根名」的包做客户端发现
+// （exactPackageSpecifier 遇到子路径直接返 undefined），没有这条 row，client.js 就永远不进
+// __DSH_BOOT__，侧栏入口整个消失。锚点故意不带 id，所以不占「包含的组件」那一行。
+patchText.match(/^[ \t]*-[ \t]*name:[ \t]*'dsh-deputy'[ \t]*$/m)
+  ? ok("patch 有包根锚点 row（name: 'dsh-deputy'，无 id）")
+  : bad("cordis.patch.yml 缺少包根锚点 row（name: 'dsh-deputy'）——client.js 不会被发现，侧栏入口会消失")
+pkg.exports?.['.'] && exists(pkg.exports['.']) ? ok(`exports["."] 指向 ${pkg.exports['.']}`) : bad('exports["."] 未声明或文件不存在')
+
 // 8c. 浏览器组件的 5 个工具：同样要过 0.2.2 的 schema 子集与 author 参数表
 const { browserToolSpecs } = await import(pathToFileURL(path.join(ROOT, 'src/browser/tools.mjs')).href)
 const fakeDaemon = {

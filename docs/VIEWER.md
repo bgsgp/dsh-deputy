@@ -30,6 +30,23 @@
 `dsh.client.inject` 列的是**包名**（浏览器模块依赖），不是 Cordis 服务名；
 服务名写在 client bundle 里的 `export const inject`（这里只等 `slots`）。
 
+## 为什么 patch 里还要一条包根 row
+
+`client.js` 能被服务端发现，靠的不是 `package.json` 的 `dsh.client` 单独存在，而是
+**Loader 里必须有一条 `name` 恰好等于包根名 `dsh-deputy` 的 row**：
+
+```
+dsh-client-modules → resolveMeta(entry.options.name) → locatePkgJson(name)
+  expectedPackageName = exactPackageSpecifier(name)
+  // @scope/name 或无斜杠名才有效；'dsh-deputy/os' 这种子路径直接 undefined
+  if (!pathLike && expectedPackageName === undefined) return undefined  // 不是客户端行
+```
+
+所以 `cordis.patch.yml` 里有一条**没有 id** 的 `name: 'dsh-deputy'`（入口 `src/index.mjs`，
+空组件）。没有它，两条组件 row（`dsh-deputy/os`、`dsh-deputy/browser`）都只是服务端行，
+`__DSH_BOOT__.entries` 里没有 `dsh-deputy`，侧栏那一行就整个消失。
+锚点刻意不带 id：插件管理器的「包含的组件」按带 id 的 insert 行统计，所以仍然只显示两行。
+
 ## 挂载点：sidebar.panellist + main
 
 0.2.2 的侧栏契约（`@deepseek-ai/dsh-client-ui-sidebar` 的 SlotMap）：

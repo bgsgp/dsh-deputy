@@ -550,6 +550,19 @@ await test('HTTP 面板：健康检查、合并采帧、坐标换算与输入校
   }
 })
 
+await test('包根锚点：index.mjs 是 name=dsh-deputy 的空组件，老路径仍能拿到 toolSpecs', async () => {
+  const anchor = await import('../src/index.mjs')
+  assert.equal(anchor.name, 'dsh-deputy')
+  assert.deepEqual(anchor.inject, [])
+  assert.equal(anchor.apply(), undefined)
+  assert.equal(typeof anchor.toolSpecs, 'function')
+  assert.equal(typeof anchor.registerTools, 'function')
+  const patch = readFileSync(new URL('../cordis.patch.yml', import.meta.url), 'utf8')
+  assert.match(patch, /^[ \t]*-[ \t]*name:[ \t]*'dsh-deputy'[ \t]*$/m, 'patch 必须有包根锚点 row')
+  assert.match(patch, /id: dsh-deputy-os/, 'patch 必须有 os 组件 row')
+  assert.match(patch, /id: dsh-deputy-browser/, 'patch 必须有 browser 组件 row')
+})
+
 console.log(
   FAILED.length
     ? `\n${PASS.length} 项通过，${FAILED.length} 项失败\n${PASS.map((p) => '  ✓ ' + p).join('\n')}`

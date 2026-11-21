@@ -94,7 +94,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 33 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器 ref 代数 / 状态总线 / HTTP 面板 / 客户端注册
+node test/run-tests.mjs        # 34 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器 ref 代数 / 状态总线 / HTTP 面板 / 客户端注册
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -110,6 +110,11 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `dsh-deputy/os` | `src/os.mjs` | 隔离桌面：会话、采帧、拼图、输入 |
 | `dsh-deputy/browser` | `src/browser.mjs` | 浏览器：独立实例 + CDP + 快照/动作 |
 
+**包根锚点 row**：`cordis.patch.yml` 里除两条组件 row 外，还有一条**不带 `id`** 的
+`name: 'dsh-deputy'`。0.2.2 的 `client-modules` 只对「Loader 行 name 恰好等于包根名」的包做
+客户端发现（`exactPackageSpecifier` 遇到子路径直接返回 `undefined`），没有这条 row，`client.js`
+就永远进不了 `__DSH_BOOT__`，侧栏「DSH操作电脑」整行不会出现。它不带 id，所以插件管理器的
+「包含的组件」仍然是两行。
 **桌面（os）四个工具**
 
 | 工具 | 作用 | 返回 |
@@ -160,7 +165,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 按 DSH 0.2.2 插件 ABI 机检（清单 / 工具 / 图片 / icon） |
 | `scripts/publish-npm.mjs` | ✅ 可用 | 舞台打包 + 直接 npm publish（标准三段版本） |
-| `cordis.patch.yml` | ✅ 一个包两个组件 | 一条 `- insert:` 下 `dsh-deputy/os` + `dsh-deputy/browser` |
+| `cordis.patch.yml` | ✅ 一个包两个组件 + 包根锚点 | 一条 `- insert:` 下 `dsh-deputy/os` + `dsh-deputy/browser`，外加无 id 的包根 row `dsh-deputy`（客户端发现用，不占组件行） |
 | `status.mjs` 状态总线 | ✅ 实现 + 单测 | 两组件各写一段，合成 `error > running > idle` 一个点 |
 | MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
 | 侧栏入口（`client.js`） | ✅ 真机验证（0.2.2-rc.5） | 侧栏「应用」一行「DSH操作电脑」+ 中央整页；`sidebar.panellist` / `main` 同 id 注册，`check-plugin` 防回退到 `shell.overlay` |

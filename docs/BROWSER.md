@@ -146,7 +146,7 @@ display/visibility/opacity/cursor/overflow，includeDOMRects/includePaintOrder�
 ## 8. 自己怎么验
 
 ```bash
-node test/run-tests.mjs        # 33 项，含浏览器工具的 schema / 失败信封 / ref 代数回归
+node test/run-tests.mjs        # 34 项，含浏览器工具的 schema / 失败信封 / ref 代数回归
 node scripts/check-plugin.mjs  # 含「两个组件」「browser 5 工具」「状态总线」三段
 ```
 
