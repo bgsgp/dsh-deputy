@@ -179,6 +179,13 @@ if (clientRel && exists(clientRel)) {
     ? bad('client.js 状态点仍绝对定位到行右端（会和大头针重叠）')
     : ok('client.js 状态点不再占用行右端')
   src.includes("exports.inject") ? ok('client.js 声明 exports.inject') : warn('client.js 未声明 exports.inject')
+  src.includes('ResizeObserver') && src.includes('fitFrame')
+    ? ok('client.js 监视窗按真实帧与可用区域等比适配')
+    : bad('client.js 缺少 ResizeObserver/fitFrame 等比适配')
+  src.includes('draggable: false') && src.includes('onDragStart') && !src.includes('cursor:crosshair')
+    ? ok('client.js 禁用原生拖图且不再使用十字光标')
+    : bad('client.js 仍可能把点击变成原生拖图')
+  src.includes('framePoint') ? ok('client.js 点击按实际渲染图片换算') : bad('client.js 缺少 framePoint 坐标换算')
 }
 
 // 6. icon：0.2.x 从 package.json 顶层 icon 内联进商城/插件列表

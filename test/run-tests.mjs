@@ -694,7 +694,7 @@ await test('浏览器截图：saveImage 元数据通过 render 变成 image cont
   assert.ok(blocks.some((block) => block.type === 'image' && block.attachment.attachmentId === 'att-browser'))
 })
 
-await test('客户端：sidebar.panellist + main 同 id 注册（stub 加载 client.js）', async () => {
+await test('客户端：侧栏注册、监视窗等比适配与点击坐标换算', async () => {
   const savedWindow = globalThis.window
   const savedDocument = globalThis.document
   const React = {
@@ -723,6 +723,19 @@ await test('客户端：sidebar.panellist + main 同 id 注册（stub 加载 cli
     const exp = loaded.factory(() => React)
     assert.deepEqual(exp.inject, ['slots'])
     assert.equal(typeof exp.apply, 'function')
+    const landscape = exp.fitFrame(1920, 1080, 960, 600)
+    assert.deepEqual(landscape, { width: 960, height: 540, scale: 0.5 })
+    const portrait = exp.fitFrame(800, 1200, 500, 500)
+    assert.equal(portrait.height, 500)
+    assert.ok(portrait.width <= 500 && portrait.height <= 500)
+    assert.deepEqual(exp.fitFrame(1920, 1080, 0, 600), { width: 0, height: 0, scale: 0 })
+    assert.deepEqual(exp.framePoint(150, 75, { left: 100, top: 50, width: 400, height: 200 }), { x: 0.125, y: 0.125 })
+    assert.equal(exp.framePoint(50, 75, { left: 100, top: 50, width: 400, height: 200 }), null)
+    assert.match(src, /ResizeObserver/)
+    assert.match(src, /draggable: false/)
+    assert.match(src, /onDragStart/)
+    assert.match(src, /cursor:pointer/)
+    assert.equal(src.includes('cursor:crosshair'), false)
     const calls = []
     exp.apply({
       effect: (body) => body(),

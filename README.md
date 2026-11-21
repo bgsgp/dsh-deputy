@@ -94,7 +94,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 50 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 登录态复制 / HTTP 面板
+node test/run-tests.mjs        # 50 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -139,7 +139,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 左侧「应用」栏（新建 / 搜索 / 自定义 / QQ机器人 / 定时任务 / …）底部会多一行
 **「DSH操作电脑」**。点它，中央面板切到整页的隔离桌面：
 
-- 每 0.7 秒拉一帧灰度画面，点画面 = 在隔离桌面里点一下（坐标归一化，缩放不变形）；
+- 每 0.7 秒拉一帧灰度画面，按宿主真实帧尺寸与窗口可用区域等比完整显示；点画面 = 在隔离桌面里点一下（缩放与居中留白均正确换算，原生拖图已禁用）；
 - 「打开桌面」起会话（Windows 上弹 UAC）、「收起桌面」回收；
 - 桌面里还没窗口时（`NOWINDOW`）不再给一张全黑图，而是提示 + 「启动 Edge / 启动记事本」按钮；
 - 这页不是浮窗，也不占会话；切回对话在侧栏点一下即可。

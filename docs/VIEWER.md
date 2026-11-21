@@ -96,6 +96,14 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 换算在 `viewer.mjs` 里做（见 `POST /api/input`）。捕获的是窗口局部帧时，宿主还会回传窗口
 `originX/originY`，由 `DesktopSession.input()` 平移为桌面绝对坐标，避免窗口不在原点时整体点偏。
 
+1.3.40 起，监视窗不再只依赖 flex 里的 `max-width/max-height`：`ResizeObserver` 读取中央可视区域的
+实际 `clientWidth/clientHeight`，结合宿主帧的真实 `width/height` 计算 `min(宽比, 高比)`，再显式设置
+图片渲染宽高。画面完整等比放入窗口，必要时居中留白，不裁剪；底部同时显示源尺寸、渲染尺寸和缩放比例。
+
+图片禁用原生拖图（`draggable=false` + `dragstart` 阻止），鼠标改为普通指针。点击仍按图片自身
+`getBoundingClientRect()` 换算，所以居中留白不会被误算成桌面坐标。这里的“禁止拖拽”指禁止拖动
+这张 HTML 图片，不是远程桌面拖拽协议；后者仍是下面的独立限制。
+
 ## 状态点：一个点代表两个组件
 
 `/api/status` 返回 `src/status.mjs` 的合成快照：

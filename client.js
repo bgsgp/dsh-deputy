@@ -38,7 +38,7 @@ window.__ModuleLoader__.load({
     const PANEL_LABEL = 'DSH操作电脑'
 
     const CSS = `
-.ddp-page{display:flex;flex-direction:column;height:100%;min-height:0;font-size:13px;
+.ddp-page{display:flex;flex-direction:column;height:100%;max-height:100%;width:100%;min-width:0;min-height:0;overflow:hidden;font-size:13px;
   background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
 .ddp-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 14px;
   border-bottom:1px solid var(--dsw-alias-border-l1);flex-wrap:wrap}
@@ -52,9 +52,9 @@ window.__ModuleLoader__.load({
 .ddp-btn:hover{border-color:var(--dsw-alias-brand-primary)}
 .ddp-btn:disabled{opacity:.5;cursor:wait}
 .ddp-btn[data-primary="1"]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
-.ddp-stage{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;
-  overflow:auto;background:var(--dsw-alias-bg-layer-2)}
-.ddp-img{max-width:100%;max-height:100%;image-rendering:pixelated;cursor:crosshair;
+.ddp-stage{flex:1 1 0;min-width:0;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;
+  overflow:hidden;background:var(--dsw-alias-bg-layer-2)}
+.ddp-img{display:block;flex:none;image-rendering:auto;cursor:pointer;user-select:none;-webkit-user-drag:none;touch-action:none;
   box-shadow:0 6px 24px rgba(0,0,0,.28)}
 .ddp-empty{max-width:560px;padding:24px;line-height:1.9;text-align:center;opacity:.9}
 .ddp-empty b{font-size:15px;display:block;margin-bottom:6px;opacity:1}
@@ -106,6 +106,30 @@ window.__ModuleLoader__.load({
     }
 
     const LEVEL_TEXT = { running: '正在运行', error: '出现错误', idle: '未运行' }
+
+    /** 用宿主帧的真实像素尺寸适配当前可视区域，保持宽高比且不裁剪。 */
+    function fitFrame(sourceWidth, sourceHeight, stageWidth, stageHeight) {
+      const sw = Number(sourceWidth)
+      const sh = Number(sourceHeight)
+      const cw = Number(stageWidth)
+      const ch = Number(stageHeight)
+      if (!(sw > 0 && sh > 0 && cw > 0 && ch > 0)) return { width: 0, height: 0, scale: 0 }
+      const scale = Math.min(cw / sw, ch / sh)
+      return {
+        width: Math.max(1, Math.floor(sw * scale)),
+        height: Math.max(1, Math.floor(sh * scale)),
+        scale,
+      }
+    }
+
+    /** 点击坐标只相对实际渲染出来的图片计算；容器留白不会进入桌面坐标。 */
+    function framePoint(clientX, clientY, rect) {
+      if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null
+      const x = (Number(clientX) - rect.left) / rect.width
+      const y = (Number(clientY) - rect.top) / rect.height
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return null
+      return { x, y }
+    }
 
     /**
      * 状态点数据源：os + browser 两个组件的合成状态，2s 轮询一次。
@@ -218,6 +242,8 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState(null)
       const [bus, setBus] = useState(statusStore.value)
       const imgRef = useRef(null)
+      const stageRef = useRef(null)
+      const [stageSize, setStageSize] = useState({ width: 0, height: 0 })
       const mountedRef = useRef(true)
       const pullingRef = useRef(false)
       const beatingRef = useRef(false)
@@ -267,6 +293,24 @@ window.__ModuleLoader__.load({
       }, [])
 
       useEffect(() => {
+        const stage = stageRef.current
+        if (!stage) return undefined
+        const update = () => {
+          const width = Math.max(0, stage.clientWidth)
+          const height = Math.max(0, stage.clientHeight)
+          setStageSize((prev) => (prev.width === width && prev.height === height ? prev : { width, height }))
+        }
+        update()
+        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(update) : null
+        observer?.observe(stage)
+        window.addEventListener('resize', update)
+        return () => {
+          observer?.disconnect()
+          window.removeEventListener('resize', update)
+        }
+      }, [])
+
+      useEffect(() => {
         mountedRef.current = true
         beat()
         pull()
@@ -283,17 +327,18 @@ window.__ModuleLoader__.load({
       }, [pull, beat])
 
       const onClick = async (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        if (e.button !== 0 && e.button !== 2) return
         const img = imgRef.current
         if (!img || !frame) return
-        const rect = img.getBoundingClientRect()
-        const x = (e.clientX - rect.left) / rect.width
-        const y = (e.clientY - rect.top) / rect.height
-        if (x < 0 || x > 1 || y < 0 || y > 1) return
+        const point = framePoint(e.clientX, e.clientY, img.getBoundingClientRect())
+        if (!point) return
         try {
           const r = await api('/api/input', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ type: 'click', x, y, button: e.button === 2 ? 'right' : 'left' }),
+            body: JSON.stringify({ type: 'click', x: point.x, y: point.y, button: e.button === 2 ? 'right' : 'left' }),
           })
           if (!r.ok) setErr(r.reason)
           setTimeout(pull, 260)
@@ -342,6 +387,7 @@ window.__ModuleLoader__.load({
       const isWin = !health || health.platform === 'win32'
       const openState = state === 'opened' || state === 'running'
       const browserText = bus && bus.browser ? BROWSER_TEXT[bus.browser.state] || bus.browser.state : null
+      const display = frame ? fitFrame(frame.width, frame.height, stageSize.width, stageSize.height) : { width: 0, height: 0, scale: 0 }
 
       return h(
         'section',
@@ -362,13 +408,21 @@ window.__ModuleLoader__.load({
         ),
         h(
           'div',
-          { className: 'ddp-stage' },
+          { className: 'ddp-stage', ref: stageRef },
           frame
             ? h('img', {
                 ref: imgRef,
                 className: 'ddp-img',
                 alt: '隔离桌面画面',
                 src: 'data:image/png;base64,' + frame.png,
+                width: frame.width,
+                height: frame.height,
+                style: { width: display.width + 'px', height: display.height + 'px' },
+                draggable: false,
+                onDragStart: (e) => e.preventDefault(),
+                onMouseDown: (e) => {
+                  if (e.button === 0 || e.button === 2) e.preventDefault()
+                },
                 onClick: onClick,
                 onContextMenu: (e) => {
                   e.preventDefault()
@@ -403,7 +457,7 @@ window.__ModuleLoader__.load({
         h(
           'footer',
           { className: 'ddp-foot' },
-          h('span', null, frame ? frame.width + '×' + frame.height : '—'),
+          h('span', null, frame ? frame.width + '×' + frame.height + ' → ' + display.width + '×' + display.height + '（' + Math.round(display.scale * 100) + '%）' : '—'),
           h('span', null, health && health.pid ? 'pid ' + health.pid : '无会话'),
           h('span', null, bus && bus.browser && bus.browser.state === 'running' ? '浏览器 pid ' + (bus.browser.detail || '—') : ''),
           h('span', { className: 'ddp-spacer' }),
@@ -438,6 +492,8 @@ window.__ModuleLoader__.load({
     exports.PANEL_LABEL = PANEL_LABEL
     exports.DeputyIcon = DeputyIcon
     exports.DeputyPage = DeputyPage
+    exports.fitFrame = fitFrame
+    exports.framePoint = framePoint
     exports.subscribeStatus = subscribeStatus
 
     return module.exports
