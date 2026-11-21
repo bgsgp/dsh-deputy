@@ -297,7 +297,7 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
         await session.input(input)
         return json(res, 200, { ok: true, input, width, height })
       } catch (e) {
-        return json(res, e.statusCode ?? 200, { ok: false, reason: e.message })
+        return json(res, e.statusCode ?? 200, { ok: false, reason: e.message, code: e.code ?? null })
       }
     }
 

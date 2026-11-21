@@ -32,7 +32,7 @@ close()                ────────► 宿主退出 → 桌面销毁
 这就是"真的在里面操作"与"只是在旁边截图"的区别——采帧、取树、输入、目标进程，
 四者处在同一个桌面对象上。
 
-## 1.1 两种模式：`-Mode user`（默认）与 `-Mode isolated`
+## 1.1 三种模式：`-Mode user`（默认）、`-Mode virtual` 与 `-Mode isolated`
 
 宿主脚本的参数是 `param([Parameter(Mandatory=$true)][string]$Op, [string]$Name='deputy-default', [ValidateSet('isolated','user')][string]$Mode='isolated')`，
 JS 侧的默认值来自 `config.desktop.mode`（**默认 `user`**），经 `createHostTransport({ mode })` 变成命令行参数 `-Mode user`。
@@ -48,6 +48,22 @@ JS 侧的默认值来自 `config.desktop.mode`（**默认 `user`**），经 `cre
 | 启动程序 | `CreateProcessW`；随后 `RaiseProcessWindow` 用 `SetWindowPos`(TOPMOST→NOTOPMOST, NOACTIVATE) 抬到 z-order 顶部（前台锁下 `SetForegroundWindow` 无效），单实例程序按 exe 名找已有窗口 | `CreateProcessW` 到目标桌面，`PrintWindow` 抓它 |
 | 关会话 | 只退出宿主，**不** `CloseDesktop`、**不**杀 `$launched` 里的进程 | 退出即销毁桌面与里面所有窗口 |
 | 抢不抢用户 | 抢（点击会把目标窗口提到前台） | 不抢 |
+
+### `virtual`：任务视图里建一块临时桌面
+
+`virtual` 把 `user` 的输入与截图能力（`SendInput`、整屏 `BitBlt`）搬进一块**新建的虚拟桌面**：
+
+| 阶段 | 做法 |
+|---|---|
+| 打开 | 读注册表 `CurrentVirtualDesktop` 记下原 GUID → `keybd_event` 合成 `Win+Ctrl+D` → 等 1.8 s → 重新读 GUID。桌面数没增或 GUID 没变就 `throw`（说明被输入法/安全软件拦了） |
+| 截图 / 输入 | 与 `user` 完全一致（当前活动桌面就是我们的临时桌面） |
+| 启动程序 | 与 `user` 一致，但 pid 记在 `$vdLaunched` 里，关会话时只杀这批 |
+| 关闭 | 先杀 `$vdLaunched` → **停在临时桌面上**合成 `Win+Ctrl+F4` → 等 1.6 s → 用 GUID 确认已离开。`finally` 里还有一次兜底 |
+| 被切走 | `input` 前用 `OnTempDesktop()` 校验，用户切到别的桌面就回 `VDESK_NOT_ACTIVE`，绝不对着别人的桌面发点击 |
+
+两个坑（真机）：① **关闭顺序不能反**，先切回原桌面再按 `Win+Ctrl+F4` 删的是用户自己的桌面；
+② `IVirtualDesktopManager.MoveWindowToDesktop` 对别的进程的窗口（例如 DSH 主窗口）返回 `E_ACCESSDENIED`（`0x80070005`），
+所以面板没法跟着挪过去 —— 操作期间用户看到的是新桌面，看不到侧栏那一页。
 
 为什么默认改成 `user`：豆包那类「电脑操作」= **当前用户会话整屏截图 + 合成鼠标键盘事件**。
 隐藏桌面拿不到 DWM 合成（桌面级 `BitBlt` 全黑，只能逐窗口 `PrintWindow`，用户看起来"只有左上角一块"），

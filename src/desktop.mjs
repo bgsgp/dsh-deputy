@@ -186,7 +186,9 @@ export function createFakeTransport() {
 export class DesktopSession {
   constructor({ transport, name, captureWidth = 1280, captureHeight = 800, mode = 'isolated' } = {}) {
     this.transport = transport ?? createHostTransport({ mode })
-    // 'user' = 直接操作当前输入桌面（整屏截图 + SendInput）；'isolated' = 独立桌面（窗口截图 + PostMessage）。
+    // 'user' = 直接操作当前输入桌面（整屏截图 + SendInput）；
+    // 'virtual' = 任务视图里新建一块临时虚拟桌面（彩色整屏 + SendInput，退出时收掉）；
+    // 'isolated' = 独立 Win32 桌面（窗口截图 + PostMessage，没有 DWM 也不能 SendInput）。
     this.mode = mode
     this.name = name ?? `deputy-${Math.random().toString(16).slice(2, 8)}`
     this.state = 'idle'
@@ -214,7 +216,9 @@ export class DesktopSession {
       try {
         const opened = await this.transport.start(this.name)
         if (opened?.mode) this.mode = opened.mode
-        if (this.mode !== 'user' && opened?.attached === false) {
+        // isolated 才是"另建一块 Win32 桌面"，attached=false 表示没附着上；
+        // user / virtual 都在真实输入桌面上，没有 attached 这回事。
+        if (this.mode === 'isolated' && opened?.attached === false) {
           throw new DesktopError(`宿主未能附着到隔离桌面（Win32 ${opened.attachErr ?? 'unknown'}）`, 'EATTACH')
         }
         this.state = 'opened'
@@ -313,7 +317,13 @@ export class DesktopSession {
     } else if (payload.op === 'type' && typeof payload.text !== 'string') {
       throw new DesktopError('type 需要字符串 text', 'EARGS')
     }
-    return this.transport.request({ op: 'input', input: payload, desktop: this.name })
+    const r = await this.transport.request({ op: 'input', input: payload, desktop: this.name })
+    // 宿主可以拒绝输入（virtual 模式下用户切走了桌面 → VDESK_NOT_ACTIVE）。
+    // 不在这里抛，viewer 会把 ok:true 一路回给面板，用户以为点了其实什么都没发生。
+    if (r && r.ok === false) {
+      throw new DesktopError(r.error ?? '宿主拒绝了这次输入', r.code ?? 'EINPUT')
+    }
+    return r
   }
 
   /** 幂等关闭；并发 close 共享同一个 Promise，不重复终止宿主。 */

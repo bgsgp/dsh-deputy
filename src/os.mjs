@@ -40,6 +40,9 @@ export const config = {
   desktop: {
     // user = 操作本机真实桌面（豆包 / UI-TARS 那种：整屏截图 + SendInput）；
     // isolated = 独立桌面（隔离性更好，但没有 DWM、也不能用 SendInput）。默认 user。
+    // user = 操作本机真实桌面（整屏截图 + SendInput，面板就在眼前，默认）；
+    // virtual = 任务视图里新建一块临时桌面，用完收回（彩色整屏 + SendInput，不碰用户原来的窗口）；
+    // isolated = 独立 Win32 桌面（隔离性最好，但没有 DWM、也不能用 SendInput）。
     mode: 'user',
     name: null,
     prelaunch: null,
@@ -58,7 +61,7 @@ export const state = { session: null, deputy: null, viewer: null }
 function ensureSession(deputyConfig) {
   if (state.session) return state.session
   const d = deputyConfig.desktop ?? {}
-  const mode = d.mode === 'isolated' ? 'isolated' : 'user'
+  const mode = d.mode === 'isolated' || d.mode === 'virtual' ? d.mode : 'user'
   state.session = new DesktopSession({
     transport: createHostTransport({ mode }),
     name: d.name ?? undefined,

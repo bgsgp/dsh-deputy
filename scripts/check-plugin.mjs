@@ -392,7 +392,7 @@ if (exists(ps1Path)) {
     ? ok('windows-desktop.ps1 带 UTF-8 BOM（无 BOM 会被 CP936 解码吞换行）')
     : bad('windows-desktop.ps1 缺 UTF-8 BOM —— Windows PowerShell 会按 CP936 解码并报语法错误')
   const ps1 = raw.toString('utf8')
-  for (const needle of ['ValidateSet(\'isolated\', \'user\')', '$isUser', 'ClickUser', 'TypeUser', 'KeyUser', 'LaunchUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware', 'RaiseProcessWindow', 'SetWindowPos']) {
+  for (const needle of ['ValidateSet(\'isolated\', \'user\', \'virtual\')', '$isUser', 'ClickUser', 'TypeUser', 'KeyUser', 'LaunchUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware', 'RaiseProcessWindow', 'SetWindowPos']) {
     ps1.includes(needle) ? ok('宿主真实桌面分支用到 ' + needle) : bad('宿主缺少 ' + needle + '（user 模式点不动/打不了字/截图错位）')
   }
   for (const needle of ['PostMessage', 'WindowFromPoint', 'ScreenToClient', 'WM_CHAR', 'GetGUIThreadInfo']) {
@@ -404,6 +404,17 @@ if (exists(ps1Path)) {
   ps1.includes('-not $isUser')
     ? ok('user 模式不关闭用户桌面、不杀用户进程')
     : bad('user 模式缺少 $isUser 保护（可能 CloseDesktop 或杀掉用户进程）')
+  // virtual 模式：任务视图里新建一块临时桌面，操作完收掉（彩色整屏 + SendInput 都能用）。
+  for (const needle of ['$isVirtual', 'WinCtrlCombo', 'keybd_event', 'CurrentDesktopGuid', 'CloseVirtualDesktop', 'VDESK_NOT_ACTIVE', 'vdesk-status']) {
+    ps1.includes(needle) ? ok('宿主虚拟桌面模式用到 ' + needle) : bad('宿主缺少 ' + needle + '（virtual 模式不可用）')
+  }
+  ps1.includes('停在临时桌面上')
+    ? ok('宿主注明关闭虚拟桌面的顺序（先切回原桌面再 F4 会删掉用户桌面）')
+    : warn('宿主未说明 virtual 模式的关闭顺序')
+  const osSrc = exists('src/os.mjs') ? readFileSync(path.join(ROOT, 'src/os.mjs'), 'utf8') : ''
+  osSrc.includes("=== 'virtual'")
+    ? ok('os 组件允许把 desktop.mode 配成 virtual')
+    : bad('os 组件不认 virtual 模式（配了也只会退回 user）')
   // 8h. 彩色快照（面板要的是用户看到的画面，灰度帧只能给感知链路）
   for (const needle of ["'snapshot'", 'EncodePng', 'ToPngBase64', 'SnapshotScreen', 'SnapshotWindow', '$maxW']) {
     ps1.includes(needle) ? ok('宿主彩色快照用到 ' + needle) : bad('宿主缺少 ' + needle + '（面板只能拿到灰度帧）')

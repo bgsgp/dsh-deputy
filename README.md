@@ -48,18 +48,28 @@ dsh plugin --profile web add dsh-deputy
 | **变化即证据** | 帧的价值 = 相对上一帧变了多少；0..1 分数分四档（still/minor/meaningful/major） |
 | **语义优先** | UIA `InvokePattern`/`ValuePattern` 打头，键鼠是兜底不是首选 |
 | **ROI 校验** | 动作后只比对它该影响的区域，并额外检测"别处有没有被带脏" |
-| **两种桌面模式** | `user`（默认）：整屏 + `SendInput`，和你手动操作是同一张桌面；`isolated`：常驻宿主握独立 Desktop，`PrintWindow` + `PostMessage`，不抢焦点 |
+| **三种桌面模式** | `user`（默认）：整屏 + `SendInput`，和你手动操作是同一张桌面；`virtual`：任务视图里新建一块临时桌面，彩色整屏 + `SendInput`，关会话即收回；`isolated`：常驻宿主握独立 Desktop，`PrintWindow` + `PostMessage`，不抢焦点 |
 
 ---
 
-## 两种桌面模式
+## 三种桌面模式
 
 `config.desktop.mode` 决定动作落在哪张桌面上（默认 `user`）：
 
 | 模式 | 桌面 | 你看到的 | 采帧 | 点击 / 打字 | 会抢你的鼠标吗 |
 |---|---|---|---|---|---|
 | `user`（默认） | 你自己的真实桌面 | 整屏（真机 1920×1080，含任务栏、其它窗口） | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：点击前把目标窗口提到前台 |
+| `virtual` | 任务视图里**新建的临时桌面**（`Win+Ctrl+D`） | 整屏彩色、完整，但只有壁纸和图标——你原来那些窗口都留在上一张桌面上 | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：操作期间你的屏幕就在这张新桌面上 |
 | `isolated` | 宿主 `CreateDesktopW` 新建的隐藏桌面 | 该桌面里的窗口（不是整屏） | 逐窗口 `PrintWindow`（无 DWM，桌面级 BitBlt 全黑） | `PostMessage` 直投窗口 | 不会 |
+
+`virtual` 就是「豆包虚拟桌面」那套观感：真机实测开出来的新桌面是完整彩色壁纸 + 图标 + 任务栏，
+里面没有任何用户窗口；启动记事本、点正文、打字（`deputy virtual desktop ok 789`）、彩色整屏截图全部正常，
+`close()` 之后桌面数回到 1、当前桌面 GUID 回到用户原来那块（`a94b74c5-…`）。
+两个必须知道的点：① 新桌面靠合成 `Win+Ctrl+D` 建（Windows 没有公开 API），GUID 从注册表
+`HKCU\…\Explorer\VirtualDesktops` 读出校验；② **关闭顺序不能反**——必须停在临时桌面上直接按 `Win+Ctrl+F4`，
+先切回原桌面再按 F4 删掉的是用户自己的桌面（真机踩过一次，窗口被并到了剩余桌面）。
+另外 DSH 面板窗口本身在你的原桌面上（`MoveWindowToDesktop` 对别人的窗口返回 `E_ACCESSDENIED`），
+所以操作期间你看不到侧栏那一页，只能看到被操作的新桌面；中途切走桌面时输入会被拒绝并回 `VDESK_NOT_ACTIVE`。
 
 为什么默认是 `user`：豆包那类「电脑操作」就是**在你当前会话里**整屏截图 + 注入合成键盘鼠标事件。
 而 `CreateDesktop` 隐藏桌面拿不到合成画面（只能逐窗口抓，所以看起来"只有左上角"），它不是输入桌面、
@@ -111,7 +121,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 52 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
+node test/run-tests.mjs        # 53 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -177,8 +187,8 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `roi.mjs` 校验 | ✅ 实现 + 单测 | 三分 verdict |
 | `budget.mjs` 预算 | ✅ 实现 + 单测 | 三档降级 |
 | `runner.mjs` 闭环 | ✅ 实现 + 单测（注入式，无需 Windows） | 重试 / 熔断 |
-| `desktop.mjs` 桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭；`mode=user\|isolated` 透传给宿主 |
-| `scripts/windows-desktop.ps1` | ✅ 双模式真机验证 | 常驻宿主 `-Mode user\|isolated`。`user`：整屏 1920×1080 捕获 + `SendInput`，实测点开记事本正文打出 `deputy user desktop ok 123`；`isolated`：建桌面 + 逐窗口 `PrintWindow` + `PostMessage`，实测打开 Edge 拍到 B 站首页并打出 `deputy desktop hello 123` |
+| `desktop.mjs` 桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭；`mode=user\|virtual\|isolated` 透传给宿主；宿主拒绝输入时抛 `VDESK_NOT_ACTIVE` |
+| `scripts/windows-desktop.ps1` | ✅ 三模式真机验证 | 常驻宿主 `-Mode user\|isolated`。`user`：整屏 1920×1080 捕获 + `SendInput`，实测点开记事本正文打出 `deputy user desktop ok 123`；`isolated`：建桌面 + 逐窗口 `PrintWindow` + `PostMessage`，实测打开 Edge 拍到 B 站首页并打出 `deputy desktop hello 123`；`virtual`：`Win+Ctrl+D` 新桌面 + 彩色整屏 + `SendInput`，实测记事本里打出 `deputy virtual desktop ok 789` 且关会话后桌面数回到 1 |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 按 DSH 0.2.2 插件 ABI 机检（清单 / 工具 / 图片 / icon） |
 | `scripts/publish-npm.mjs` | ✅ 可用 | 舞台打包 + 直接 npm publish（标准三段版本） |
@@ -190,7 +200,8 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | 浏览器组件（`src/browser/`） | 🟡 代码补全，待真机回归 | 1.3.39 已加入结构化等待、真实遮挡阻断、多标签、上传下载、截图附件、幂等和异常状态恢复；保持五工具 ABI。OOPIF iframe 仍是边界。本轮按用户要求未启动浏览器实测，详见 [docs/BROWSER.md](docs/BROWSER.md) |
 
 **已知未验证点**：`isolated` 模式下 UAC/安全桌面抢占、靠 `GetKeyState` 判断修饰键的快捷键
-（部分浏览器 `Ctrl+L` 之类不认投递的按键）；`user` 模式在高 DPI 多屏、缩放非 100% 的副屏上坐标换算。
+（部分浏览器 `Ctrl+L` 之类不认投递的按键）；`user`/`virtual` 模式在高 DPI 多屏、缩放非 100% 的副屏上坐标换算；
+`virtual` 模式下把 DSH 面板窗口钉到临时桌面（Windows 拒绝跨进程 `MoveWindowToDesktop`）尚未实现。
 **已知代价**：`user` 模式会占用真实鼠标键盘（点击先把目标窗口提到前台），跑任务时别抢鼠标。
 已解决（真机）：`SetThreadDesktop` 在 PowerShell 里必须放到"从未建过窗口"的后台 STA 线程；
 `isolated` 桌面拍画面必须用逐窗口 `PrintWindow`（桌面级 BitBlt 全黑）、输入必须用 `PostMessage`；

@@ -14,11 +14,18 @@
 #  2) SetThreadDesktop 只能在该线程未创建窗口前调用；本进程在 create 之后立即切换。
 #  3) 非活动桌面不能用 Windows.Graphics.Capture，只能用 BitBlt，硬件加速界面会拍成黑块。
 #  4) 整个流程需要管理员（CreateDesktopW 用 GENERIC_ALL）。权限不足会直接报错，不静默降级。
+#
+# 三种模式（-Mode）：
+#   isolated  独立 Win32 Desktop（CreateDesktopW）：窗口截图 + PostMessage，全黑问题与"点不动"的根源就在这里。
+#   user      当前用户桌面：整屏截图 + SendInput，正常但它就是用户正在用的桌面。
+#   virtual   任务视图虚拟桌面：用 Win+Ctrl+D 新建一块干净的虚拟桌面（壁纸/图标/任务栏都在、没有用户窗口），
+#             整屏截图 + SendInput 都正常；关闭时 Win+Ctrl+F4 收掉并回到原桌面。豆包那种"独立的彩色桌面"就是这个。
+#             Windows 没有公开的"创建虚拟桌面"API，只能合成快捷键，所以要求系统输入法/键盘没被拦截。
 
 param(
     [Parameter(Mandatory = $true)][string]$Op,
     [string]$Name = 'deputy-default',
-    [ValidateSet('isolated', 'user')][string]$Mode = 'isolated'
+    [ValidateSet('isolated', 'user', 'virtual')][string]$Mode = 'isolated'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -440,6 +447,49 @@ public class Desk2 {
         return true;
     }
 
+    // ---- 虚拟桌面模式（任务视图）：Win+Ctrl+D 新建、Win+Ctrl+F4 关闭、注册表读当前 GUID ----
+    // Windows 没有公开的"创建虚拟桌面"API（IVirtualDesktop* 是未公开 COM，且随版本变化），
+    // 所以只能合成快捷键；GUID 则从注册表读，用来确认"确实切到了新桌面"和"确实回到了原桌面"。
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+
+    public static void WinCtrlCombo(byte vk) {
+        const byte LWIN = 0x5B, LCTRL = 0x11;
+        const uint UP = 0x0002;
+        keybd_event(LWIN, 0, 0, IntPtr.Zero);
+        keybd_event(LCTRL, 0, 0, IntPtr.Zero);
+        Thread.Sleep(40);
+        keybd_event(vk, 0, 0, IntPtr.Zero);
+        Thread.Sleep(40);
+        keybd_event(vk, 0, UP, IntPtr.Zero);
+        keybd_event(LCTRL, 0, UP, IntPtr.Zero);
+        keybd_event(LWIN, 0, UP, IntPtr.Zero);
+        Thread.Sleep(60);
+    }
+
+    private static byte[] VdValue(string name) {
+        using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops")) {
+            if (key == null) return null;
+            return key.GetValue(name) as byte[];
+        }
+    }
+
+    public static Guid CurrentDesktopGuid() {
+        byte[] raw = VdValue("CurrentVirtualDesktop");
+        if (raw == null || raw.Length < 16) return Guid.Empty;
+        return new Guid(raw);
+    }
+
+    public static int DesktopCount() {
+        byte[] raw = VdValue("VirtualDesktopIDs");
+        if (raw == null) return 0;
+        return raw.Length / 16;
+    }
+
+    public static bool OnTempDesktop(Guid temp) {
+        Guid cur = CurrentDesktopGuid();
+        return temp != Guid.Empty && cur == temp;
+    }
+
     public static void ClickOn(IntPtr desk, int x, int y, bool right, int clicks) { OnDesktop(desk, delegate() { Click(x, y, right, clicks); }); }
     public static void TypeOn(IntPtr desk, string text) { OnDesktop(desk, delegate() { TypeText(text); }); }
     public static void KeyOn(IntPtr desk, string combo) { OnDesktop(desk, delegate() { KeyCombo(combo); }); }
@@ -654,6 +704,36 @@ $script:out = [Console]::Out
 $handle = $null
 $launched = @()
 $isUser = ($Mode -eq 'user')
+$isVirtual = ($Mode -eq 'virtual')
+$script:vdOrig = [Guid]::Empty
+$script:vdTemp = [Guid]::Empty
+$script:vdCount = 0
+$vdLaunched = @()
+
+function NewVirtualDesktop {
+    # 记录当前桌面 → Win+Ctrl+D → 读回新桌面 GUID，确认真的建出来了。
+    $script:vdOrig = [Deputy.Desk2]::CurrentDesktopGuid()
+    $before = [Deputy.Desk2]::DesktopCount()
+    [Deputy.Desk2]::WinCtrlCombo(0x44)   # Win+Ctrl+D 新建虚拟桌面
+    Start-Sleep -Milliseconds 1800
+    $script:vdTemp = [Deputy.Desk2]::CurrentDesktopGuid()
+    $script:vdCount = [Deputy.Desk2]::DesktopCount()
+    if ($script:vdCount -le $before -or $script:vdTemp -eq $script:vdOrig) {
+        throw '没能新建虚拟桌面（Win+Ctrl+D 未生效），检查是否被输入法或安全软件拦截'
+    }
+    return $script:vdTemp
+}
+
+function CloseVirtualDesktop {
+    # 关键顺序：必须**停在临时桌面上**直接 F4。
+    # 先切回原桌面再 F4，删掉的是用户自己的桌面（实测发生过）。
+    if ($script:vdTemp -eq [Guid]::Empty) { return $true }
+    if ([Deputy.Desk2]::OnTempDesktop($script:vdTemp)) {
+        [Deputy.Desk2]::WinCtrlCombo(0x73)   # Win+Ctrl+F4 关闭当前虚拟桌面
+        Start-Sleep -Milliseconds 1600
+    }
+    return (-not [Deputy.Desk2]::OnTempDesktop($script:vdTemp))
+}
 
 try {
     if ($isUser) {
@@ -664,6 +744,14 @@ try {
         $attached = $true
         $attachErr = 0
         Reply @{ id = 0; ok = $true; desktop = 'user'; mode = 'user'; attached = $true; attachErr = 0; pid = $PID }
+    } elseif ($isVirtual) {
+        # virtual 模式：任务视图里新建一块干净的虚拟桌面（彩色、完整，只有壁纸图标和任务栏），
+        # 整屏截图和 SendInput 都正常，而且不动用户原来那个桌面上的窗口。
+        $handle = [IntPtr]::Zero
+        NewVirtualDesktop | Out-Null
+        $attached = $true
+        $attachErr = 0
+        Reply @{ id = 0; ok = $true; desktop = 'virtual'; mode = 'virtual'; attached = $true; attachErr = 0; orig = $script:vdOrig.ToString(); temp = $script:vdTemp.ToString(); count = $script:vdCount; pid = $PID }
     } else {
         $handle = [Deputy.Desk2]::Create($Name)
         # 在干净 STA 线程里验证附着；失败必须终止，绝不能让 UIA 静默落到主桌面。
@@ -691,7 +779,7 @@ try {
                     Reply @{ id = $req.id; ok = $true; desktop = $Name; mode = $Mode; attached = $attached; pid = $PID }
                 }
                 'launch' {
-                    if ($isUser) {
+                    if ($isUser -or $isVirtual) {
                         $pidOn = [Deputy.Desk2]::LaunchUser($req.exe, [string]$req.args)
                         # 新窗口可能起在已有窗口后面：抢到前台，后续点击/打字才不会落到别人的窗口上。
                         $focused = [Deputy.Desk2]::RaiseProcessWindow($pidOn, 2500)
@@ -709,13 +797,14 @@ try {
                         $pidOn = [Deputy.Desk2]::Launch($req.exe, [string]$req.args, $Name)
                     }
                     # 用户桌面模式不登记 pid：finally 里绝不许杀掉用户自己的进程。
-                    if (-not $isUser) { $launched += $pidOn }
+                    if ($isVirtual) { $vdLaunched += $pidOn }
+                    elseif (-not $isUser) { $launched += $pidOn }
                     $resp = @{ id = $req.id; ok = $true; pid = $pidOn; mode = $Mode }
-                    if ($isUser) { $resp.focused = $focused }
+                    if ($isUser -or $isVirtual) { $resp.focused = $focused }
                     Reply $resp
                 }
                 'capture' {
-                    if ($isUser) {
+                    if ($isUser -or $isVirtual) {
                         # 用户桌面有 DWM 合成，整屏 BitBlt 就是用户看到的画面（含任务栏与所有窗口）。
                         $sw = [Deputy.Desk2]::ScreenWidth()
                         $sh = [Deputy.Desk2]::ScreenHeight()
@@ -743,7 +832,7 @@ try {
                     # frameWidth/frameHeight 回原始像素尺寸，点击坐标仍按真实屏幕换算。
                     $maxW = 0
                     if ($req.maxWidth) { $maxW = [int]$req.maxWidth }
-                    if ($req.target -eq 'window' -and -not $isUser) {
+                    if ($req.target -eq 'window' -and -not $isUser -and -not $isVirtual) {
                         $targetPid = 0
                         if ($launched.Count -gt 0) { $targetPid = [int]$launched[$launched.Count - 1] }
                         try {
@@ -763,6 +852,9 @@ try {
                     $w = [Deputy.Desk2]::CapWidth
                     $h = [Deputy.Desk2]::CapHeight
                     Reply @{ id = $req.id; ok = $true; width = $w; height = $h; frameWidth = $sw; frameHeight = $sh; originX = 0; originY = 0; source = 'screen'; pngBase64 = $png }
+                }
+                'vdesk-status' {
+                    Reply @{ id = $req.id; ok = $true; mode = $Mode; active = [Deputy.Desk2]::OnTempDesktop($script:vdTemp); current = [Deputy.Desk2]::CurrentDesktopGuid().ToString(); orig = $script:vdOrig.ToString(); temp = $script:vdTemp.ToString(); count = [Deputy.Desk2]::DesktopCount() }
                 }
                 'debug' {
                     Reply @{ id = $req.id; ok = $true; info = [Deputy.Desk2]::Debug($handle) }
@@ -786,16 +878,23 @@ try {
                     $in = $req.input
                     $clicks = 1
                     if ($null -ne $in.clicks) { $clicks = [Math]::Max(1, [Math]::Min(3, [int]$in.clicks)) }
+                    # virtual 只能用 SendInput，前提是当前活动桌面确实是我们的临时桌面；
+                    # 用户中途切走了就明确拒绝，绝不把点击和字符打到别人桌面上。
+                    if ($isVirtual -and -not [Deputy.Desk2]::OnTempDesktop($script:vdTemp)) {
+                        Reply @{ id = $req.id; ok = $false; code = 'VDESK_NOT_ACTIVE'; error = '当前不在 deputy 的虚拟桌面上（用户切换了桌面），先切回来再操作' }
+                        continue
+                    }
+                    $onRealDesktop = ($isUser -or $isVirtual)
                     if ($in.op -eq 'click') {
-                        if ($isUser) { [Deputy.Desk2]::ClickUser([int]$in.x, [int]$in.y, ($in.button -eq 'right'), $clicks) }
+                        if ($onRealDesktop) { [Deputy.Desk2]::ClickUser([int]$in.x, [int]$in.y, ($in.button -eq 'right'), $clicks) }
                         else { [Deputy.Desk2]::ClickOn($handle, [int]$in.x, [int]$in.y, ($in.button -eq 'right'), $clicks) }
                     }
                     elseif ($in.op -eq 'type') {
-                        if ($isUser) { [Deputy.Desk2]::TypeUser([string]$in.text) }
+                        if ($onRealDesktop) { [Deputy.Desk2]::TypeUser([string]$in.text) }
                         else { [Deputy.Desk2]::TypeOn($handle, [string]$in.text) }
                     }
                     elseif ($in.op -eq 'key') {
-                        if ($isUser) { [Deputy.Desk2]::KeyUser([string]$in.combo) }
+                        if ($onRealDesktop) { [Deputy.Desk2]::KeyUser([string]$in.combo) }
                         else { [Deputy.Desk2]::KeyOn($handle, [string]$in.combo) }
                     }
                     else { throw "不支持的 input.op $($in.op)" }
@@ -807,7 +906,14 @@ try {
                     Reply @{ id = $req.id; ok = $true }
                 }
                 'close' {
-                    Reply @{ id = $req.id; ok = $true }
+                    $restored = $true
+                    if ($isVirtual) {
+                        # 先杀掉自己在这块桌面上起的进程（只杀自己 launch 的），再收掉临时桌面。
+                        foreach ($p in $vdLaunched) { try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch { } }
+                        $vdLaunched = @()
+                        $restored = CloseVirtualDesktop
+                    }
+                    Reply @{ id = $req.id; ok = $true; desktop = 'closed'; mode = $Mode; restored = $restored }
                     break
                 }
                 default { throw "未知 op $($req.op)" }
@@ -821,5 +927,10 @@ try {
 finally {
     # 用户桌面模式下 $launched 为空，且绝不能去 CloseDesktop(0)。
     foreach ($p in $launched) { try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch { } }
-    if (-not $isUser -and $handle) { [Deputy.Desk2]::CloseDesktop($handle) | Out-Null }
+    # virtual 兜底：宿主异常退出也要把临时桌面收掉，别把用户丢在一块空桌面上。
+    if ($isVirtual) {
+        foreach ($p in $vdLaunched) { try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch { } }
+        try { CloseVirtualDesktop | Out-Null } catch { }
+    }
+    if (-not $isUser -and -not $isVirtual -and $handle) { [Deputy.Desk2]::CloseDesktop($handle) | Out-Null }
 }

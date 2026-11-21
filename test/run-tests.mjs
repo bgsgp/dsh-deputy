@@ -769,7 +769,7 @@ await test('宿主脚本：user 模式走 SendInput、isolated 走 PostMessage�
   assert.equal(raw[2], 0xbf)
   const ps1 = raw.toString('utf8')
   // user 模式：真实桌面是输入桌面，SendInput 才有效（隔离桌面实测 0/N）
-  for (const needle of ['ValidateSet(\'isolated\', \'user\')', '$isUser', 'ClickUser', 'TypeUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware', 'RaiseProcessWindow', 'SetWindowPos', 'SWP_NOACTIVATE'.replace('SWP_NOACTIVATE', 'noActivate')]) {
+  for (const needle of ['ValidateSet(\'isolated\', \'user\', \'virtual\')', '$isUser', 'ClickUser', 'TypeUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware', 'RaiseProcessWindow', 'SetWindowPos', 'SWP_NOACTIVATE'.replace('SWP_NOACTIVATE', 'noActivate')]) {
     assert.ok(ps1.includes(needle), '宿主脚本缺少 ' + needle)
   }
   // isolated 模式：非输入桌面，只能 PostMessage 投递
@@ -777,6 +777,33 @@ await test('宿主脚本：user 模式走 SendInput、isolated 走 PostMessage�
     assert.ok(ps1.includes(needle), '宿主脚本缺少 ' + needle)
   }
   assert.ok(ps1.includes('-not $isUser'), 'user 模式必须跳过 CloseDesktop/杀进程')
+  // virtual 模式：Win+Ctrl+D 新建、Win+Ctrl+F4 收掉，GUID 从注册表读来做校验。
+  for (const needle of ['$isVirtual', 'WinCtrlCombo', 'keybd_event', 'CurrentDesktopGuid', 'CloseVirtualDesktop', 'VDESK_NOT_ACTIVE', 'vdesk-status']) {
+    assert.ok(ps1.includes(needle), '宿主脚本缺少 ' + needle)
+  }
+})
+
+await test('virtual 模式：不要求 attached，宿主拒绝输入时抛 VDESK_NOT_ACTIVE', async () => {
+  const transport = {
+    start: async () => ({ ok: true, desktop: 'virtual', mode: 'virtual', attached: false }),
+    request: async (payload) => {
+      if (payload.op === 'input') {
+        return { ok: false, code: 'VDESK_NOT_ACTIVE', error: '当前不在 deputy 的虚拟桌面上' }
+      }
+      return { ok: true }
+    },
+    stop: () => {},
+  }
+  const session = new DesktopSession({ transport, name: 'deputy-virtual-test', mode: 'virtual' })
+  await session.open()
+  assert.equal(session.mode, 'virtual', 'open 应采纳宿主回报的 mode')
+  assert.equal(session.state, 'opened')
+  // 宿主说"用户切走了桌面"时必须让调用方看到 VDESK_NOT_ACTIVE，而不是静默成功。
+  await assert.rejects(
+    () => session.input({ op: 'type', text: 'x' }),
+    (err) => err.code === 'VDESK_NOT_ACTIVE'
+  )
+  await session.close()
 })
 
 await test('HTTP 面板：健康检查、合并采帧、坐标换算与输入校验', async () => {

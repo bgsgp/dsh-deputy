@@ -2,6 +2,28 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.44
+
+### 新增 `virtual` 桌面模式：任务视图里开一块临时桌面（豆包式观感）
+- **三种模式**：`config.desktop.mode` 现在认 `user`（默认，当前桌面）/ `virtual`（任务视图临时桌面）/
+  `isolated`（独立 Win32 桌面）。`src/os.mjs` 只白名单这两个新值，其余一律回落 `user`。
+- **宿主实现**（`scripts/windows-desktop.ps1`）：C# 侧新增 `keybd_event` 绑定的 `WinCtrlCombo`、
+  注册表读取器 `VdValue`、`CurrentDesktopGuid` / `DesktopCount` / `OnTempDesktop`；PS 侧 `NewVirtualDesktop`
+  （记原 GUID → `Win+Ctrl+D` → 等 1.8 s → 读回校验）与 `CloseVirtualDesktop`（停在新桌面上直接 `Win+Ctrl+F4`，
+  等 1.6 s → 用 GUID 确认已离开）。启动分支回 `mode:'virtual'` 与原/临时 GUID，新增 `vdesk-status` op。
+- **输入守卫**：`virtual` 的 `input` 先校验当前桌面仍是临时桌面，否则回 `VDESK_NOT_ACTIVE`；
+  `DesktopSession.input` 遇到宿主 `ok:false` 现在会抛错（以前 viewer 会把 `ok:true` 一路回给面板，点了等于没点）。
+  启动程序的 pid 记在独立的 `$vdLaunched`，`close`/`finally` 只杀这一批，**绝不**碰用户自己的进程。
+- **screen 快照/捕获**：`virtual` 与 `user` 一样走整屏（彩色 PNG），窗口分支仅 `isolated` 使用。
+- **真机验证**：探针开 `virtual` 会话 → 空桌面彩色整屏（任务栏「桌面 2」）→ 启动记事本 → 点正文 → 打出
+  `deputy virtual desktop ok 789`；`close()` 之后注册表 `count=1`、`CurrentVirtualDesktop` 回到原 GUID。
+- **已知边界**：DSH 面板窗口无法挪到临时桌面（`MoveWindowToDesktop` 对别的进程返回 `E_ACCESSDENIED`），
+  操作期间用户看到新桌面而看不到侧栏页；切换桌面瞬间屏幕会闪一下。
+- **自检**：`node test/run-tests.mjs` = **53 项全部通过**（新增「virtual 不要求 attached、宿主拒绝输入抛
+  `VDESK_NOT_ACTIVE`」）；`scripts/check-plugin.mjs` 增加 virtual 断言（`$isVirtual`、`WinCtrlCombo`、
+  `CurrentDesktopGuid`、`CloseVirtualDesktop`、`VDESK_NOT_ACTIVE`、`vdesk-status`、关闭顺序注释、
+  `os.mjs` 认 `virtual`）。
+
 ## 1.3.43
 
 ### 面板改成彩色整屏，启动程序抬到最前
