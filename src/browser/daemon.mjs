@@ -1,18 +1,25 @@
-// 常驻浏览器 daemon（context.md 第 1、2 条）
-//
-// - 它持有浏览器实例、CDP 连接、target 注册表和节点注册表；
-// - 工具只是一个连 localhost 的瘦客户端，离散调用之间不靠内存传递状态；
-// - 状态双写：内存（活的）+ statePath 指向的 state.json（重启后能认出上次的 target）。
-//
-// 骨架阶段的取舍：单标签、单 session、单浏览器实例；多标签 / iframe / target 切换留给后续调优。
-// TODO(kimi): 多 target 并行 attach、iframe OOPIF、下载与上传、状态快照恢复。
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+// 常驻浏览器 daemon：独立浏览器进程、CDP 多 target、ref 注册表与可恢复状态。
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { CdpConnection } from './cdp.mjs'
 import { browserError } from './errors.mjs'
 import { launchBrowser } from './launch.mjs'
 import { buildSnapshot } from './snapshot.mjs'
 import { runSteps } from './act.mjs'
+import { settleAfterAction, waitForElement, waitForLoad } from './wait.mjs'
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+const safeUrl = (value) => {
+  try {
+    const url = new URL(value)
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return value ? String(value).split(/[?#]/, 1)[0] : ''
+  }
+}
 
 export class BrowserDaemon {
   constructor(options = {}) {
@@ -21,8 +28,10 @@ export class BrowserDaemon {
       headless: options.headless ?? false,
       userDataDir: options.userDataDir ?? null,
       statePath: options.statePath ?? null,
+      downloadDir: options.downloadDir ?? path.join(os.tmpdir(), 'dsh-deputy-downloads'),
+      restoreState: options.restoreState !== false,
       timeoutMs: options.timeoutMs ?? 15000,
-      loginState: options.loginState ?? null, // { sourceRoot, profile } | null：见 cookies.mjs
+      loginState: options.loginState ?? null,
       launch: options.launch ?? launchBrowser,
     }
     this.browser = null
@@ -32,17 +41,23 @@ export class BrowserDaemon {
     this.targetId = null
     this.docEpoch = 0
     this.targets = new Map() // targetId -> { type, url, title, sessionId, epoch }
-    this.nodes = new Map() // ref -> { backendNodeId, epoch, role, name }
+    this.nodes = new Map() // ref -> { backendNodeId, epoch, role, name, box, disabled }
+    this.networkPending = new Map() // `${sessionId}:${requestId}` -> url（不输出 URL）
+    this.networkActivity = new Map() // sessionId -> timestamp
+    this.domChangedAt = new Map() // sessionId -> timestamp
+    this.downloads = new Map() // guid -> 不含页面凭据的下载元数据
+    this.actionResults = new Map() // idempotencyKey -> { at, result }
+    this.actionInflight = new Map()
     this.lastUrl = null
     this.lastError = null
     this.unsubscribe = null
-    this.login = null // 登录态继承结果（launch 回传的摘要）
-    this.cookieCount = null // 新实例实际能读到的 cookie 数（Storage.getCookies 数出来的）
+    this.login = null
+    this.cookieCount = null
   }
 
   get state() {
-    if (this.browser && this.pageSession) return 'running'
-    if (this.browser) return 'starting'
+    if (this.browser && this.cdp && !this.cdp.disconnected && this.pageSession) return 'running'
+    if (this.browser || this.starting) return 'starting'
     return 'stopped'
   }
 
@@ -54,10 +69,12 @@ export class BrowserDaemon {
       port: this.browser?.port ?? null,
       userDataDir: this.browser?.userDataDir ?? this.options.userDataDir,
       targetId: this.targetId,
+      targets: [...this.targets.values()].filter((t) => t.type === 'page').length,
       docEpoch: this.docEpoch,
       refs: this.nodes.size,
       url: this.lastUrl,
       error: this.lastError,
+      downloads: [...this.downloads.values()].slice(-10).map((d) => ({ ...d })),
       cookies: {
         inherit: Boolean(this.login?.inherit),
         source: this.login?.source ?? null,
@@ -69,8 +86,23 @@ export class BrowserDaemon {
     }
   }
 
-  /** 幂等启动：并发调用共享同一个启动 Promise */
+  /** 幂等启动：并发调用共享同一个启动 Promise。 */
   async ensureStarted() {
+    if (this.browser?.closed) {
+      this.cdp?.close()
+      this.cdp = null
+      this.browser = null
+      this.pageSession = null
+      this.targetId = null
+      this.nodes.clear()
+    } else if (this.cdp?.disconnected) {
+      this.cdp.close()
+      this.cdp = null
+      this.pageSession = null
+      this.targetId = null
+      this.nodes.clear()
+      for (const target of this.targets.values()) delete target.sessionId
+    }
     if (this.cdp && this.pageSession) return this.status()
     if (this.starting) return this.starting
     this.starting = (async () => {
@@ -89,6 +121,14 @@ export class BrowserDaemon {
           this.cdp = await CdpConnection.connect(this.browser.wsUrl, { timeoutMs: this.options.timeoutMs })
           this.unsubscribe = this.cdp.on((msg) => this.#onEvent(msg))
         }
+        mkdirSync(this.options.downloadDir, { recursive: true })
+        await this.cdp
+          .send('Browser.setDownloadBehavior', {
+            behavior: 'allow',
+            downloadPath: this.options.downloadDir,
+            eventsEnabled: true,
+          })
+          .catch(() => {})
         await this.#attachDefaultPage()
         await this.#countCookies()
         this.lastError = null
@@ -104,19 +144,25 @@ export class BrowserDaemon {
     return this.starting
   }
 
-  /** 数一下新实例里实际有多少 cookie：这是「登录态真的继承到了」的唯一硬证据。 */
   async #countCookies() {
     try {
       const r = await this.cdp.send('Storage.getCookies', {}, this.pageSession)
       this.cookieCount = Array.isArray(r?.cookies) ? r.cookies.length : 0
     } catch {
-      this.cookieCount = null // 数不出来就如实留空，不假装成功
+      this.cookieCount = null
     }
   }
 
   async #attachDefaultPage() {
-    const { targetInfos = [] } = await this.cdp.send('Target.getTargets')
-    let page = targetInfos.find((t) => t.type === 'page' && !t.url.startsWith('devtools://'))
+    const targets = await this.listTargets()
+    const saved = this.options.restoreState ? this.readState() : null
+    let page = targets.find((t) => t.targetId === saved?.activeTarget)
+    if (!page && saved?.activeTarget) {
+      const old = saved.targets?.find((t) => t.targetId === saved.activeTarget)
+      // 进程重启后 targetId 会变；用脱敏 URL 找回 Chrome 恢复的标签。
+      if (old?.url) page = targets.find((t) => safeUrl(t.url) === old.url)
+    }
+    page ??= targets.find((t) => t.type === 'page' && !t.url.startsWith('devtools://'))
     if (!page) {
       const created = await this.cdp.send('Target.createTarget', { url: 'about:blank' })
       page = { targetId: created.targetId, type: 'page', url: 'about:blank', title: '' }
@@ -124,31 +170,167 @@ export class BrowserDaemon {
     await this.attach(page.targetId)
   }
 
-  /** attach 一个 page target；flatten 模式下所有命令都带 sessionId */
-  async attach(targetId) {
-    const { sessionId } = await this.cdp.send('Target.attachToTarget', { targetId, flatten: true })
-    const session = { targetId, sessionId, epoch: ++this.docEpoch }
-    this.targets.set(targetId, { type: 'page', url: this.lastUrl ?? '', title: '', ...session })
+  async listTargets() {
+    if (!this.cdp) throw browserError('NOT_RUNNING', '浏览器还没启动')
+    const { targetInfos = [] } = await this.cdp.send('Target.getTargets')
+    const seen = new Set()
+    for (const info of targetInfos) {
+      if (info.type !== 'page' || info.url?.startsWith('devtools://')) continue
+      seen.add(info.targetId)
+      const old = this.targets.get(info.targetId) ?? {}
+      this.targets.set(info.targetId, {
+        ...old,
+        targetId: info.targetId,
+        type: info.type,
+        url: info.url ?? old.url ?? '',
+        title: info.title ?? old.title ?? '',
+      })
+    }
+    for (const id of this.targets.keys()) if (!seen.has(id) && id !== this.targetId) this.targets.delete(id)
+    await this.#persist()
+    return [...this.targets.values()].map((t) => ({
+      targetId: t.targetId,
+      url: t.url,
+      title: t.title,
+      active: t.targetId === this.targetId,
+      attached: Boolean(t.sessionId),
+    }))
+  }
+
+  /** attach 并激活一个 page target；重复 attach 会复用 flatten session。 */
+  async attach(targetId, { activate = false } = {}) {
+    if (!this.cdp) throw browserError('NOT_RUNNING', '浏览器还没启动')
+    let current = this.targets.get(targetId)
+    let sessionId = current?.sessionId
+    if (!sessionId) {
+      const attached = await this.cdp.send('Target.attachToTarget', { targetId, flatten: true })
+      sessionId = attached.sessionId
+    }
+    if (!sessionId) throw browserError('CDP_ERROR', `attach ${targetId} 没返回 sessionId`)
+    current = { type: 'page', url: '', title: '', ...current, targetId, sessionId, epoch: ++this.docEpoch }
+    this.targets.set(targetId, current)
     this.pageSession = sessionId
     this.targetId = targetId
+    this.lastUrl = current.url || this.lastUrl
+    this.nodes.clear()
     for (const domain of ['Page.enable', 'Runtime.enable', 'DOM.enable', 'Network.enable']) {
-      try {
-        await this.cdp.send(domain, {}, sessionId)
-      } catch {
-        /* Network/DOM 在极简 target 上可能不可用，忽略 */
-      }
+      await this.cdp.send(domain, {}, sessionId).catch(() => {})
+    }
+    if (activate) await this.cdp.send('Page.bringToFront', {}, sessionId).catch(() => {})
+    await this.#persist()
+    return { targetId, sessionId, epoch: current.epoch }
+  }
+
+  async switchTarget(targetId) {
+    if (typeof targetId !== 'string' || !targetId) throw browserError('BAD_ARGS', '切换标签需要 targetId')
+    const targets = await this.listTargets()
+    if (!targets.some((t) => t.targetId === targetId)) throw browserError('BAD_ARGS', `标签不存在：${targetId}`)
+    const session = await this.attach(targetId, { activate: true })
+    const target = this.targets.get(targetId)
+    this.lastUrl = target?.url ?? ''
+    return { ok: true, ...session, url: this.lastUrl, title: target?.title ?? '' }
+  }
+
+  async newTarget(url = 'about:blank') {
+    if (!this.cdp) throw browserError('NOT_RUNNING', '浏览器还没启动')
+    if (/^(javascript|data):/i.test(url)) throw browserError('BAD_ARGS', '新标签不接受 javascript: / data: URL')
+    const created = await this.cdp.send('Target.createTarget', { url: url || 'about:blank' })
+    this.targets.set(created.targetId, { targetId: created.targetId, type: 'page', url: url || 'about:blank', title: '' })
+    await this.attach(created.targetId, { activate: true })
+    await this.waitForLoad({ timeoutMs: this.options.timeoutMs, quietMs: 200 }).catch(() => {})
+    return { ok: true, targetId: created.targetId, url: this.lastUrl ?? url }
+  }
+
+  async closeTarget(targetId = this.targetId) {
+    if (!this.cdp) throw browserError('NOT_RUNNING', '浏览器还没启动')
+    if (!targetId) throw browserError('BAD_ARGS', '没有可关闭的标签')
+    const wasActive = targetId === this.targetId
+    await this.cdp.send('Target.closeTarget', { targetId })
+    this.targets.delete(targetId)
+    if (wasActive) {
+      this.pageSession = null
+      this.targetId = null
+      this.lastUrl = null
+      this.nodes.clear()
+      const next = [...this.targets.values()].find((t) => t.type === 'page')
+      if (next) await this.switchTarget(next.targetId)
     }
     await this.#persist()
-    return session
+    return { ok: true, closed: targetId, activeTarget: this.targetId }
   }
 
   #onEvent(msg) {
-    if (!msg.sessionId || msg.sessionId !== this.pageSession) return
-    if (msg.method === 'Page.frameNavigated' || msg.method === 'DOM.documentUpdated' || msg.method === 'Page.navigatedWithinDocument') {
-      this.docEpoch += 1
-      // 节点注册表按 epoch 失效：旧 ref 一律 STALE_REF，绝不让旧句柄点错元素
+    if (msg.method === 'Target.targetInfoChanged') {
+      const info = msg.params?.targetInfo
+      if (info?.targetId) this.targets.set(info.targetId, { ...this.targets.get(info.targetId), ...info })
+      if (info?.targetId === this.targetId && info.url) this.lastUrl = info.url
+      return
+    }
+    if (msg.method === 'Target.targetDestroyed') {
+      const id = msg.params?.targetId
+      const old = this.targets.get(id)
+      this.targets.delete(id)
+      if (old?.sessionId) {
+        for (const key of this.networkPending.keys()) if (key.startsWith(`${old.sessionId}:`)) this.networkPending.delete(key)
+        this.networkActivity.delete(old.sessionId)
+        this.domChangedAt.delete(old.sessionId)
+      }
+      if (id === this.targetId) {
+        this.targetId = null
+        this.pageSession = null
+        this.nodes.clear()
+        this.docEpoch++
+      }
+      return
+    }
+
+    if (msg.method === 'Browser.downloadWillBegin') {
+      const p = msg.params ?? {}
+      if (p.guid) this.downloads.set(p.guid, {
+        id: p.guid,
+        state: 'inProgress',
+        filename: path.basename(p.suggestedFilename || p.guid),
+        url: safeUrl(p.url),
+        receivedBytes: 0,
+        totalBytes: p.totalBytes ?? null,
+      })
+      return
+    }
+    if (msg.method === 'Browser.downloadProgress') {
+      const p = msg.params ?? {}
+      const old = this.downloads.get(p.guid)
+      if (old) this.downloads.set(p.guid, { ...old, state: p.state, receivedBytes: p.receivedBytes ?? 0, totalBytes: p.totalBytes ?? old.totalBytes })
+      return
+    }
+
+    const sid = msg.sessionId
+    if (!sid) return
+    if (msg.method === 'Network.requestWillBeSent') {
+      const id = msg.params?.requestId
+      if (id) this.networkPending.set(`${sid}:${id}`, true)
+      this.networkActivity.set(sid, Date.now())
+      return
+    }
+    if (msg.method === 'Network.loadingFinished' || msg.method === 'Network.loadingFailed') {
+      const id = msg.params?.requestId
+      if (id) this.networkPending.delete(`${sid}:${id}`)
+      this.networkActivity.set(sid, Date.now())
+      return
+    }
+    if (msg.method === 'DOM.documentUpdated') this.domChangedAt.set(sid, Date.now())
+
+    const entry = [...this.targets.values()].find((t) => t.sessionId === sid)
+    if (msg.method === 'Page.frameNavigated') {
+      const frame = msg.params?.frame
+      if (entry && frame?.url && !frame.parentId) entry.url = frame.url
+      if (sid === this.pageSession && frame?.url && !frame.parentId) this.lastUrl = frame.url
+    }
+    if (
+      sid === this.pageSession &&
+      (msg.method === 'Page.frameNavigated' || msg.method === 'DOM.documentUpdated' || msg.method === 'Page.navigatedWithinDocument')
+    ) {
+      this.docEpoch++
       this.nodes.clear()
-      if (msg.method === 'Page.frameNavigated' && msg.params?.frame?.url) this.lastUrl = msg.params.frame.url
       this.#persist().catch(() => {})
     }
   }
@@ -157,23 +339,28 @@ export class BrowserDaemon {
     const statePath = this.options.statePath
     if (!statePath) return
     const payload = {
+      version: 2,
       at: Date.now(),
       docEpoch: this.docEpoch,
       activeTarget: this.targetId,
-      targets: [...this.targets.values()].map((t) => ({ targetId: t.targetId, url: t.url, epoch: t.epoch })),
+      // URL 去掉 query/hash，避免把登录令牌写进 state.json。
+      targets: [...this.targets.values()].map((t) => ({ targetId: t.targetId, url: safeUrl(t.url), epoch: t.epoch })),
     }
     try {
       mkdirSync(path.dirname(statePath), { recursive: true })
-      writeFileSync(statePath, JSON.stringify(payload, null, 2))
+      const tmp = `${statePath}.tmp`
+      writeFileSync(tmp, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 })
+      renameSync(tmp, statePath)
     } catch {
-      /* 状态落盘失败不影响主流程 */
+      // 状态落盘失败不影响主流程。
     }
   }
 
   readState() {
     if (!this.options.statePath) return null
     try {
-      return JSON.parse(readFileSync(this.options.statePath, 'utf8'))
+      const parsed = JSON.parse(readFileSync(this.options.statePath, 'utf8'))
+      return parsed && typeof parsed === 'object' ? parsed : null
     } catch {
       return null
     }
@@ -182,40 +369,24 @@ export class BrowserDaemon {
   async navigate(url) {
     if (!this.cdp || !this.pageSession) throw browserError('NOT_RUNNING', '浏览器还没启动')
     if (typeof url !== 'string' || !url.trim()) throw browserError('BAD_ARGS', 'navigate 需要 url')
-    await this.cdp.send('Page.navigate', { url }, this.pageSession)
-    this.lastUrl = url
+    const value = url.trim()
+    if (/^(javascript|data):/i.test(value)) throw browserError('BAD_ARGS', 'navigate 不接受 javascript: / data: URL')
+    await this.cdp.send('Page.navigate', { url: value }, this.pageSession)
+    this.lastUrl = value
     await this.waitForLoad()
-    return { ok: true, url, docEpoch: this.docEpoch }
+    return { ok: true, url: value, docEpoch: this.docEpoch }
   }
 
-  /**
-   * 导航级等待（context.md 第 5 条的第一层）：readyState=complete + 网络静默。
-   * TODO(kimi): 用 Page.lifecycleEvent 替代轮询，并把「元素级等待」放到 act 里做。
-   */
-  async waitForLoad({ timeoutMs = 10000, quietMs = 500 } = {}) {
-    const deadline = Date.now() + timeoutMs
-    let quietSince = null
-    while (Date.now() < deadline) {
-      let ready = 'loading'
-      try {
-        const r = await this.cdp.send(
-          'Runtime.evaluate',
-          { expression: 'document.readyState', returnByValue: true },
-          this.pageSession,
-        )
-        ready = r?.result?.value ?? 'loading'
-      } catch {
-        ready = 'unknown'
-      }
-      if (ready === 'complete') {
-        if (quietSince === null) quietSince = Date.now()
-        else if (Date.now() - quietSince >= quietMs) return true
-      } else {
-        quietSince = null
-      }
-      await new Promise((r) => setTimeout(r, 100))
-    }
-    throw browserError('NAV_TIMEOUT', `导航在 ${timeoutMs}ms 内没稳定`)
+  async waitForLoad(options) {
+    return waitForLoad(this, options)
+  }
+
+  async waitForElement(options) {
+    return waitForElement(this, options)
+  }
+
+  async settle(options) {
+    return settleAfterAction(this, options)
   }
 
   async evaluate(expression) {
@@ -225,6 +396,34 @@ export class BrowserDaemon {
     return r?.result?.value
   }
 
+  async screenshot({ format = 'png' } = {}) {
+    if (!this.cdp || !this.pageSession) throw browserError('NOT_RUNNING', '浏览器还没启动')
+    if (!['png', 'jpeg'].includes(format)) throw browserError('BAD_ARGS', '截图格式只支持 png/jpeg')
+    const [shot, viewport] = await Promise.all([
+      this.cdp.send('Page.captureScreenshot', { format, fromSurface: true }, this.pageSession),
+      this.evaluate('({ width: innerWidth, height: innerHeight, devicePixelRatio })').catch(() => ({ width: 0, height: 0, devicePixelRatio: 1 })),
+    ])
+    if (!shot?.data) throw browserError('CDP_ERROR', '截图没有返回图像数据')
+    return { base64: shot.data, format, ...viewport }
+  }
+
+  async waitForDownload(before = new Set(), { timeoutMs = 30000 } = {}) {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      for (const item of this.downloads.values()) {
+        if (before.has(item.id)) continue
+        if (item.state === 'canceled') throw browserError('DOWNLOAD_FAILED', `下载被取消：${item.filename}`)
+        if (item.state === 'completed') {
+          const file = path.join(this.options.downloadDir, item.filename)
+          const exists = existsSync(file)
+          return { ...item, path: exists ? file : null, bytes: exists ? statSync(file).size : item.receivedBytes }
+        }
+      }
+      await sleep(100)
+    }
+    throw browserError('DOWNLOAD_TIMEOUT', `下载在 ${timeoutMs}ms 内未完成`)
+  }
+
   async observe(options = {}) {
     await this.ensureStarted()
     return buildSnapshot(this, options)
@@ -232,36 +431,45 @@ export class BrowserDaemon {
 
   async act(options = {}) {
     await this.ensureStarted()
-    return runSteps(this, options)
+    const key = typeof options.idempotencyKey === 'string' ? options.idempotencyKey.trim() : ''
+    if (key && this.actionResults.has(key)) {
+      const cached = structuredClone(this.actionResults.get(key).result)
+      return { ...cached, deduped: true }
+    }
+    if (key && this.actionInflight.has(key)) return this.actionInflight.get(key)
+    const running = runSteps(this, options)
+    if (key) this.actionInflight.set(key, running)
+    try {
+      const result = await running
+      if (key) {
+        this.actionResults.set(key, { at: Date.now(), result: structuredClone(result) })
+        while (this.actionResults.size > 50) this.actionResults.delete(this.actionResults.keys().next().value)
+      }
+      return result
+    } finally {
+      if (key) this.actionInflight.delete(key)
+    }
   }
 
   async close() {
     try {
       this.unsubscribe?.()
     } catch {
-      /* ignore */
+      // ignore
     }
     this.unsubscribe = null
     if (this.cdp) {
-      try {
-        await this.cdp.send('Browser.close')
-      } catch {
-        /* 旧版本/已断连 */
-      }
+      await this.cdp.send('Browser.close').catch(() => {})
       this.cdp.close()
     }
     this.cdp = null
     this.pageSession = null
     this.targetId = null
+    this.lastUrl = null
     this.nodes.clear()
+    this.networkPending.clear()
     this.cookieCount = null
-    if (this.browser) {
-      try {
-        await this.browser.close()
-      } catch {
-        /* ignore */
-      }
-    }
+    if (this.browser) await this.browser.close().catch(() => {})
     this.browser = null
     await this.#persist()
     return { ok: true, state: 'stopped' }

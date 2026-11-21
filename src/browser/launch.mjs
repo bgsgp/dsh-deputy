@@ -80,6 +80,8 @@ export async function launchBrowser({ exe, args = [], userDataDir, headless = fa
     `--user-data-dir=${dir}`,
     '--no-first-run',
     '--no-default-browser-check',
+    '--restore-last-session',
+    '--hide-crash-restore-bubble',
     '--disable-background-networking',
     ...(headless ? ['--headless=new', '--disable-gpu'] : []),
     ...args,
@@ -107,6 +109,9 @@ export async function launchBrowser({ exe, args = [], userDataDir, headless = fa
       wsUrl: info.webSocketDebuggerUrl,
       browser: info.Browser ?? 'unknown',
       loginState: login,
+      get closed() {
+        return child.exitCode !== null || child.signalCode !== null
+      },
       get stderr() {
         return stderr
       },

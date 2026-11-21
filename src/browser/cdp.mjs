@@ -29,14 +29,30 @@ export class CdpConnection {
         reject(browserError('CDP_ERROR', `连不上 ${url}: ${e.message}`))
         return
       }
-      const timer = setTimeout(() => reject(browserError('CDP_ERROR', `连接 ${url} 超时`)), opts.timeoutMs ?? 15000)
+      let settled = false
+      const timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        try { ws.close() } catch { /* 忽略关闭异常 */ }
+        reject(browserError('CDP_ERROR', `连接 ${url} 超时`))
+      }, opts.timeoutMs ?? 15000)
       ws.addEventListener('open', () => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
         resolve(new CdpConnection(ws, opts))
       })
       ws.addEventListener('error', () => {
+        if (settled) return
+        settled = true
         clearTimeout(timer)
         reject(browserError('CDP_ERROR', `连接 ${url} 失败`))
+      })
+      ws.addEventListener('close', () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        reject(browserError('CDP_ERROR', `连接 ${url} 在握手前关闭`))
       })
     })
   }
@@ -77,7 +93,7 @@ export class CdpConnection {
 
   /** 发一条 CDP 命令；sessionId 用于 flatten 模式下的某个 target。 */
   send(method, params = {}, sessionId) {
-    if (this.closed) return Promise.reject(browserError('CDP_ERROR', '连接已关闭'))
+    if (this.disconnected) return Promise.reject(browserError('CDP_ERROR', '连接已关闭'))
     const id = this.nextId++
     const payload = { id, method, params }
     if (sessionId) payload.sessionId = sessionId
@@ -95,6 +111,10 @@ export class CdpConnection {
         reject(browserError('CDP_ERROR', `发送失败: ${e.message}`))
       }
     })
+  }
+
+  get disconnected() {
+    return this.closed || !this.ws || this.ws.readyState === WebSocket.CLOSING || this.ws.readyState === WebSocket.CLOSED
   }
 
   on(fn) {

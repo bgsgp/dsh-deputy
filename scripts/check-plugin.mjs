@@ -314,6 +314,7 @@ for (const want of WANT_BROWSER_TOOLS) {
   browserRegistered.some((d) => d.name === want) ? ok(`browser 工具 ${want} 已注册`) : bad(`browser 缺少工具 ${want}`)
 }
 for (const def of browserRegistered) {
+  typeof def.output?.render === 'function' ? ok(`${def.name}: output.render 完整`) : bad(`${def.name}: 缺少 output.render`)
   const schemaViolations = []
   checkRawSchema(def.output?.schema, `${def.name}.output.schema`, schemaViolations)
   schemaViolations.length ? bad(`${def.name}: output schema 不合 0.2.2 子集：${schemaViolations.join('；')}`)
@@ -358,6 +359,10 @@ const browserSrc = readFileSync(path.join(ROOT, 'src/browser.mjs'), 'utf8')
 browserSrc.includes("cookies: 'inherit'")
   ? ok('浏览器组件默认 cookies=inherit（继承本机登录态）')
   : bad('浏览器组件默认未继承登录态（config.cookies 不是 inherit）')
+browserSrc.includes("'attachments'") && browserSrc.includes('saveImage')
+  ? ok('浏览器组件声明 attachments 并接入 saveImage')
+  : bad('浏览器组件缺少 attachments/saveImage 截图链路')
+exists('src/browser/wait.mjs') ? ok('浏览器三层等待模块存在') : bad('缺少 src/browser/wait.mjs')
 const browserDoc = exists('docs/BROWSER.md') ? readFileSync(path.join(ROOT, 'docs/BROWSER.md'), 'utf8') : ''
 browserDoc.includes('登录态') && browserDoc.includes('风险')
   ? ok('docs/BROWSER.md 写了登录态与风险')

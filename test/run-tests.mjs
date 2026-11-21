@@ -15,6 +15,8 @@ import { toolSpecs, registerTools, toParameters } from '../src/index.mjs'
 import { setOsStatus, setBrowserStatus, noteFailure, snapshot, resetStatus } from '../src/status.mjs'
 import { browserToolSpecs } from '../src/browser/tools.mjs'
 import { runSteps } from '../src/browser/act.mjs'
+import { BrowserDaemon } from '../src/browser/daemon.mjs'
+import { waitForLoad } from '../src/browser/wait.mjs'
 
 const PASS = []
 const FAILED = []
@@ -554,6 +556,142 @@ await test('浏览器闭环：resolveRef 代数不等于 docEpoch 时拒绝点�
   assert.equal(res.ok, false)
   assert.equal(res.error.code, 'STALE_REF')
   assert.match(res.error.message, /epoch 3/)
+})
+
+await test('浏览器等待：当前标签 readyState 完成且网络静默后才返回', async () => {
+  const daemon = {
+    pageSession: 's1',
+    networkPending: new Map([['s1:r1', true], ['background:r2', true]]),
+    networkActivity: new Map(),
+    evaluate: async () => 'complete',
+  }
+  let settled = false
+  const waiting = waitForLoad(daemon, { timeoutMs: 500, quietMs: 20 }).then((value) => {
+    settled = true
+    return value
+  })
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(settled, false, '当前标签仍有在途请求时不能提前完成')
+  daemon.networkPending.delete('s1:r1')
+  daemon.networkActivity.set('s1', Date.now() - 30)
+  assert.equal(await waiting, true, '后台标签的请求不应阻塞当前标签')
+})
+
+await test('浏览器动作：disabled 控件不会被点击', async () => {
+  let mouseEvents = 0
+  const daemon = {
+    docEpoch: 1,
+    lastUrl: 'https://example.com/',
+    nodes: new Map([['e1.1', { epoch: 1, backendNodeId: 1, disabled: true }]]),
+    cdp: { send: async (method) => { if (method === 'Input.dispatchMouseEvent') mouseEvents++; return {} } },
+  }
+  const result = await runSteps(daemon, { steps: [{ verb: 'click', ref: 'e1.1' }] })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'DISABLED')
+  assert.equal(mouseEvents, 0)
+})
+
+await test('浏览器动作：真实命中检查为遮挡时不再点击目标', async () => {
+  let mouseEvents = 0
+  const daemon = {
+    docEpoch: 1,
+    lastUrl: 'https://example.com/',
+    pageSession: 's1',
+    nodes: new Map([['e1.2', { epoch: 1, backendNodeId: 2, disabled: false }]]),
+    evaluate: async () => null,
+    cdp: {
+      send: async (method) => {
+        if (method === 'DOM.getBoxModel') return { model: { content: [10, 10, 30, 10, 30, 30, 10, 30] } }
+        if (method === 'DOM.resolveNode') return { object: { objectId: 'target-object' } }
+        if (method === 'Runtime.callFunctionOn') return { result: { value: { owns: false, hit: { tag: 'div', text: 'modal' } } } }
+        if (method === 'Input.dispatchMouseEvent') mouseEvents++
+        return {}
+      },
+    },
+  }
+  const result = await runSteps(daemon, { steps: [{ verb: 'click', ref: 'e1.2' }] })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'OVERLAY')
+  assert.equal(mouseEvents, 0)
+})
+
+await test('浏览器动作：external/irreversible 必须带用户确认标记', async () => {
+  const daemon = { docEpoch: 1, lastUrl: '', nodes: new Map(), cdp: { send: async () => ({}) } }
+  const result = await runSteps(daemon, { steps: [{ verb: 'click', ref: 'e1.1', risk: 'external' }] })
+  assert.equal(result.ok, false)
+  assert.equal(result.error.code, 'CONFIRM_REQUIRED')
+  assert.match(result.error.hint, /用户明确批准/)
+})
+
+await test('浏览器多标签：切换 target 会换代并清空旧 ref', async () => {
+  const daemon = new BrowserDaemon({ restoreState: false })
+  daemon.cdp = {
+    send: async (method, params) => {
+      if (method === 'Target.getTargets') return { targetInfos: [
+        { targetId: 't1', type: 'page', url: 'https://example.com/1', title: 'one' },
+        { targetId: 't2', type: 'page', url: 'https://example.com/2', title: 'two' },
+      ] }
+      if (method === 'Target.attachToTarget') return { sessionId: 'session-2' }
+      if (method === 'Target.closeTarget') return { success: true }
+      return {}
+    },
+  }
+  daemon.targetId = 't1'
+  daemon.pageSession = 'session-1'
+  daemon.docEpoch = 1
+  daemon.nodes.set('e1.1', { epoch: 1, backendNodeId: 1 })
+  const result = await daemon.switchTarget('t2')
+  assert.equal(result.targetId, 't2')
+  assert.equal(daemon.pageSession, 'session-2')
+  assert.equal(daemon.lastUrl, 'https://example.com/2')
+  assert.equal(daemon.nodes.size, 0)
+  assert.ok(daemon.docEpoch > 1)
+})
+
+await test('浏览器幂等：同一 idempotencyKey 不重复导航', async () => {
+  const daemon = new BrowserDaemon({ restoreState: false })
+  let navigations = 0
+  daemon.ensureStarted = async () => ({ state: 'running' })
+  daemon.waitForLoad = async () => true
+  daemon.settle = async () => ({ reason: 'quiet', elapsedMs: 0 })
+  daemon.pageSession = 's1'
+  daemon.cdp = { send: async (method) => { if (method === 'Page.navigate') navigations++; return {} } }
+  const input = { steps: [{ verb: 'navigate', url: 'https://example.com/' }], idempotencyKey: 'write-1' }
+  const first = await daemon.act(input)
+  const second = await daemon.act(input)
+  assert.equal(first.ok, true)
+  assert.equal(second.ok, true)
+  assert.equal(second.deduped, true)
+  assert.equal(navigations, 1)
+})
+
+await test('浏览器下载：waitForDownload 只接受本次新完成的记录', async () => {
+  const daemon = new BrowserDaemon({ restoreState: false, downloadDir: mkdtempSync(join(tmpdir(), 'deputy-download-')) })
+  daemon.downloads.set('old', { id: 'old', state: 'completed', filename: 'old.txt' })
+  daemon.downloads.set('new', { id: 'new', state: 'inProgress', filename: 'new.txt', receivedBytes: 0 })
+  const waiting = daemon.waitForDownload(new Set(['old']), { timeoutMs: 500 })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  daemon.downloads.set('new', { id: 'new', state: 'completed', filename: 'new.txt', receivedBytes: 3 })
+  const result = await waiting
+  assert.equal(result.id, 'new')
+  assert.equal(result.bytes, 3)
+})
+
+await test('浏览器截图：saveImage 元数据通过 render 变成 image content block', async () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+  const daemon = {
+    observe: async () => ({ ok: true, text: 'snapshot', refs: [] }),
+    screenshot: async () => ({ base64: png.toString('base64'), format: 'png', width: 10, height: 20 }),
+  }
+  const spec = browserToolSpecs(daemon, {
+    saveImage: async (input) => ({ attachmentId: 'att-browser', mediaType: input.mediaType, bytes: input.data.length, width: input.width, height: input.height, name: input.name }),
+  }).find((item) => item.name === 'browser_observe')
+  const value = await spec.handler({ screenshot: true })
+  const blocks = spec.render({}, value)
+  assert.equal(value.image.attachmentId, 'att-browser')
+  assert.equal(value.image.width, 10)
+  assert.equal(value.image.height, 20)
+  assert.ok(blocks.some((block) => block.type === 'image' && block.attachment.attachmentId === 'att-browser'))
 })
 
 await test('客户端：sidebar.panellist + main 同 id 注册（stub 加载 client.js）', async () => {

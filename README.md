@@ -94,7 +94,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 42 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器 ref 代数 / 登录态复制 / 状态总线 / HTTP 面板 / 客户端注册
+node test/run-tests.mjs        # 50 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 登录态复制 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -124,13 +124,13 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `deputy_sheet` | 把缓冲帧压成 4×4 送出 | `{frames, budget, image}` + image content block |
 | `deputy_desktop` | 桌面会话：`status/open/launch/tree/close` | 会话状态 / pid / 窗口树 |
 
-**浏览器（browser）五个工具**（骨架，细节见 [docs/BROWSER.md](docs/BROWSER.md)）
+**浏览器（browser）五个工具**（完整 CDP 实现，细节见 [docs/BROWSER.md](docs/BROWSER.md)；1.3.39 待真机回归）
 
 | 工具 | 作用 | 返回 |
 |---|---|---|
 | `browser_open` | 起独立浏览器（独立 user-data-dir + CDP + 复制本机登录态），可选直接导航 | `{ok, state, url, pid, docEpoch, cookies}` |
-| `browser_observe` | 把页面压成带 ref 的文本 | `{ok, text, refs, state}` |
-| `browser_act` | 按 ref 顺序执行动作，遇布局变化就停 | `{ok, steps, diff, stopped?, error?}` |
+| `browser_observe` | DOM+AX 快照、区域过滤、状态与可选截图 | `{ok, text, refs, state, image?}` + 可选 image block |
+| `browser_act` | 基本动作、三层等待、遮挡检查、多标签、上传下载、幂等 | `{ok, steps, diff, stopped?, error?}` |
 | `browser_status` | daemon 状态（pid/端口/epoch/最近错误/cookies） | `{ok, state, pid, port, url, cookies}` |
 | `browser_close` | 关浏览器并清 daemon | `{ok, state}` |
 
@@ -170,7 +170,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
 | 侧栏入口（`client.js`） | ✅ 真机验证（0.2.2-rc.5） | 侧栏「应用」一行「DSH操作电脑」+ 中央整页；`sidebar.panellist` / `main` 同 id 注册，`check-plugin` 防回退到 `shell.overlay` |
 | DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），桌面自动化仍待真机回归 |
-| 浏览器组件（`src/browser/`） | 🟡 骨架 + 真机跑通主链 | 起 Edge → 导航 → 快照（686 节点）→ 按 ref 点击 → 回差异；登录态复制已实现（`cookies.mjs`），但本机 Edge 的 App-Bound Encryption 让新实例读到 0 条 cookie；等待三层 / 遮挡 / 多标签 / iframe / 凭据脱敏未做，清单见 [docs/BROWSER.md](docs/BROWSER.md) |
+| 浏览器组件（`src/browser/`） | 🟡 代码补全，待真机回归 | 1.3.39 已加入结构化等待、真实遮挡阻断、多标签、上传下载、截图附件、幂等和异常状态恢复；保持五工具 ABI。OOPIF iframe 仍是边界。本轮按用户要求未启动浏览器实测，详见 [docs/BROWSER.md](docs/BROWSER.md) |
 
 **已知未验证点**：x64 `INPUT` 40 字节对齐、`SendInput` 在非活动桌面的实际效果、
 UAC/安全桌面对隔离桌面的抢占。已解决：`SetThreadDesktop` 在 PowerShell 里必须放到
@@ -210,7 +210,7 @@ src/
   registry.mjs    toParameters / registerTools（0.2.x 工具注册的公共层）
   os.mjs          组件 dsh-deputy/os：隔离桌面 + 4 个 deputy_* 工具
   browser.mjs     组件 dsh-deputy/browser：浏览器 daemon + 5 个 browser_* 工具
-  browser/        launch / cdp / daemon / snapshot / act / tools / cookies / errors
+  browser/        launch / cdp / daemon / snapshot / act / wait / tools / cookies / errors
   index.mjs       兼容入口：只 `export * from './os.mjs'`
   mcp/server.mjs  最小 MCP stdio 服务
 scripts/
@@ -225,7 +225,7 @@ docs/
   ACTING.md       动作梯度、selector、三分处置、危险闸门
   ISOLATION.md    桌面隔离原理、为什么要 UAC、与 DSH 文件沙箱的区别
   DESKTOP.md      虚拟桌面执行层：常驻宿主、硬性约束、与豆包式方案的差距
-  BROWSER.md      浏览器组件：daemon/ref 生命周期/快照/动作/失败码/调优清单
+  BROWSER.md      浏览器组件：daemon/ref/等待/遮挡/多标签/上传下载/截图/恢复/风险
   INSTALL.md      安装方式、npm 发布、五步验证、UAC 与商城上架
   ROADMAP.md      版本计划
 ```

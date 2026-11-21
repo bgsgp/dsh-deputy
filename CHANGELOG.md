@@ -2,6 +2,18 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.39
+
+### 浏览器控制从单标签骨架补全为可恢复实现
+- **结构化等待**：导航同时检查 readyState、当前 target 在途请求与网络静默；新增元素等待和动作后最小静默，后台标签请求不再阻塞当前页。
+- **遮挡不再放行**：用真实 `elementFromPoint` 命中关系判断遮挡，默认返回 `OVERLAY`；只自动点击明确的关闭/取消控件，不自动点确定、支付、发布或删除。
+- **多标签与表单**：新增 target 列表/新建/切换/关闭、`waitFor`、`select`、组合键 modifiers、文件上传与下载完成事件。
+- **截图与注册 ABI**：`browser_observe` 可通过 `attachments.saveImage` 返回真实 image content block；五工具统一走公共 `tools.register` 适配层，output schema 与 author 参数表保持 0.2.x 约束。
+- **快照质量**：AX 补齐 disabled/readonly/value，`within` 支持 ref/id/区域名及后代，新增 `maxChars` 预算。
+- **写操作保护**：`external/irreversible` 步骤要求用户批准后的 `confirmed=true`；`idempotencyKey` 对进行中和最近 50 条结果去重，降低表单重复提交风险。
+- **恢复与重连**：状态原子落盘且 URL 去掉 query/hash；启动恢复上次标签，CDP 断线/浏览器退出后下一次调用重连或重启。
+- 自检用例 **42 → 50 项**，新增等待、禁用、遮挡、确认、多标签、幂等、下载与截图附件覆盖。本轮按用户要求只写代码和测试，**未启动 DSH 或浏览器做真机实测**。
+
 ## 1.3.38
 
 ### 桌面控制真机审计与闭环修复

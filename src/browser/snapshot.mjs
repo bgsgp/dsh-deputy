@@ -7,12 +7,8 @@
 // 剪枝：零/负尺寸、display:none、visibility:hidden、opacity:0、aria-hidden、被 AX 判为 ignored。
 // 排序：视口内 > 视口外；可交互 > 静态。
 // 渲染：一行一节点「缩进 + ref + role + 可读名 + 当前值/状态位」。
-// 预算：budget=summary 只给结构摘要 + 视口内明细；budget=full 给全部（由模型用 within= 二次展开）。
-//
-// 骨架阶段已知粗糙的地方（TODO(kimi)）：
-//   - text 只取 nodeValue，不合并行内文本，长文本会截断；
-//   - iframe 内容不展开（OOPIF 需要 Target.setAutoAttach）；
-//   - shadow DOM 里的可交互元素在 AX 树里能看到，但 ref 解析依赖 DOMSnapshot 的 backendNodeId 对齐。
+// 预算：summary/full 再叠加 maxChars；within 限定区域及其后代。
+// 已知边界：行内文本合并不完整；OOPIF 需要独立 target 自动附着；shadow DOM 依赖 backendNodeId 对齐。
 import { browserError } from './errors.mjs'
 
 const INTERACTIVE_ROLES = new Set([
@@ -56,7 +52,7 @@ function styleOf(doc, layoutIndex) {
   return out
 }
 
-export async function buildSnapshot(daemon, { within = null, budget = 'summary', types = null } = {}) {
+export async function buildSnapshot(daemon, { within = null, budget = 'summary', types = null, maxChars = null } = {}) {
   const cdp = daemon.cdp
   const sid = daemon.pageSession
   if (!cdp || !sid) throw browserError('NOT_RUNNING', '浏览器还没启动')
@@ -78,12 +74,18 @@ export async function buildSnapshot(daemon, { within = null, budget = 'summary',
   if (!doc) throw browserError('CDP_ERROR', 'DOMSnapshot 没返回文档（页面可能还没加载）')
 
   const axByBackend = new Map()
+  const axProp = (node, name) => node.properties?.find((p) => p.name === name)?.value?.value
   for (const n of ax.nodes ?? []) {
     const id = n.backendDOMNodeId
     if (!id) continue
-    const role = n.role?.value ?? ''
-    const name = n.name?.value ?? ''
-    axByBackend.set(id, { role, name, ignored: Boolean(n.ignored) })
+    axByBackend.set(id, {
+      role: n.role?.value ?? '',
+      name: n.name?.value ?? '',
+      ignored: Boolean(n.ignored),
+      disabled: axProp(n, 'disabled') === true,
+      readonly: axProp(n, 'readonly') === true,
+      value: axProp(n, 'value'),
+    })
   }
 
   const viewport = await daemon
@@ -106,6 +108,35 @@ export async function buildSnapshot(daemon, { within = null, budget = 'summary',
   const epoch = daemon.docEpoch
   const kept = []
   const refOf = new Map() // nodeIndex -> ref
+
+  // within 可以是当前 ref、元素 id 或区域可读名；命中后保留其所有后代。
+  const withinRoots = new Set()
+  if (within) {
+    const target = String(within)
+    const refNode = daemon.nodes.get(target)
+    if (refNode) {
+      if (refNode.epoch !== epoch) throw browserError('STALE_REF', `within ref ${target} 已过期`)
+      withinRoots.add(refNode.nodeIndex)
+    }
+    for (let i = 0; i < backendIds.length; i++) {
+      const attrs = attrsOf(i, attributes)
+      const axInfo = axByBackend.get(backendIds[i])
+      if ((attrs.id ?? '') === target || (axInfo?.name ?? '').includes(target)) withinRoots.add(i)
+    }
+    if (!withinRoots.size) throw browserError('AMBIGUOUS_TARGET', `within 没匹配到区域：${target}`)
+  }
+
+  function insideWithin(index) {
+    if (!within) return true
+    let cur = index
+    for (let depth = 0; cur >= 0 && depth < 50; depth++) {
+      if (withinRoots.has(cur)) return true
+      const parent = parentIndex[cur]
+      if (parent === undefined || parent < 0) break
+      cur = parent
+    }
+    return false
+  }
 
   function depthOf(index) {
     let d = 0
@@ -135,11 +166,7 @@ export async function buildSnapshot(daemon, { within = null, budget = 'summary',
     if (style.opacity !== undefined && Number(style.opacity) === 0) continue
     const attrs = attrsOf(nodeIndex, attributes)
     if (attrs['aria-hidden'] === 'true') continue
-    if (within) {
-      const target = String(within)
-      const hit = (attrs.id ?? '') === target || (axInfo?.name ?? '').includes(target)
-      if (!hit) continue
-    }
+    if (!insideWithin(nodeIndex)) continue
     const role = axInfo?.role || tag || 'generic'
     const name = clip(axInfo?.name || attrs['aria-label'] || attrs.title || nodeValue[nodeIndex] || '', 64)
     if (!name && role === 'generic' && !INTERACTIVE_ROLES.has(role)) {
@@ -154,7 +181,13 @@ export async function buildSnapshot(daemon, { within = null, budget = 'summary',
       role,
       name,
       // 元素节点的 nodeValue 是 -1 这类数字，只有文本节点的值才有意义
-      value: typeof nodeValue[nodeIndex] === 'string' ? clip(nodeValue[nodeIndex], 40) : '',
+      value: typeof nodeValue[nodeIndex] === 'string'
+        ? clip(nodeValue[nodeIndex], 40)
+        : typeof axInfo?.value === 'string'
+          ? clip(axInfo.value, 40)
+          : '',
+      disabled: attrs.disabled !== undefined || attrs['aria-disabled'] === 'true' || Boolean(axInfo?.disabled),
+      readonly: attrs.readonly !== undefined || attrs['aria-readonly'] === 'true' || Boolean(axInfo?.readonly),
       attrs,
       x: Math.round(x),
       y: Math.round(y),
@@ -186,11 +219,12 @@ export async function buildSnapshot(daemon, { within = null, budget = 'summary',
 
   for (const n of shown) {
     const ref = `e${epoch}.${n.nodeIndex}`
-    daemon.nodes.set(ref, { backendNodeId: backendIds[n.nodeIndex], epoch, nodeIndex: n.nodeIndex, role: n.role, name: n.name, box: [n.x, n.y, n.w, n.h] })
+    daemon.nodes.set(ref, { backendNodeId: backendIds[n.nodeIndex], epoch, nodeIndex: n.nodeIndex, role: n.role, name: n.name, box: [n.x, n.y, n.w, n.h], disabled: n.disabled, readonly: n.readonly })
     refOf.set(n.nodeIndex, ref)
     const indent = '  '.repeat(Math.min(12, Math.max(0, n.depth - 1)))
     const state = []
-    if (n.attrs.disabled === '' || n.attrs['aria-disabled'] === 'true') state.push('disabled')
+    if (n.disabled) state.push('disabled')
+    if (n.readonly) state.push('readonly')
     if (n.attrs.checked !== undefined || n.attrs['aria-checked'] !== undefined) state.push(`checked=${n.attrs.checked ?? n.attrs['aria-checked']}`)
     if (n.attrs.href) state.push(clip(n.attrs.href, 48))
     if (!n.onScreen) state.push('off-screen')
@@ -198,11 +232,17 @@ export async function buildSnapshot(daemon, { within = null, budget = 'summary',
     lines.push(`${indent}[${ref}] ${n.role}${n.name ? ` "${n.name}"` : ''}${n.value ? ` = "${n.value}"` : ''} ${boxText}${state.length ? ' · ' + state.join(' ') : ''}`)
   }
 
-  const text = lines.join('\n')
+  const defaultChars = budget === 'full' ? 60000 : 16000
+  const charLimit = Math.min(120000, Math.max(1000, Number(maxChars) || defaultChars))
+  const fullText = lines.join('\n')
+  const text = fullText.length > charLimit ? `${fullText.slice(0, charLimit)}\n… 已按 maxChars=${charLimit} 截断；用 within= 或 types= 收窄` : fullText
+  const refs = shown
+    .map((n) => ({ ref: refOf.get(n.nodeIndex), role: n.role, name: n.name, box: [n.x, n.y, n.w, n.h], onScreen: n.onScreen }))
+    .filter((item) => text.includes(`[${item.ref}]`))
   return {
     ok: true,
     text,
-    refs: shown.map((n) => ({ ref: refOf.get(n.nodeIndex), role: n.role, name: n.name, box: [n.x, n.y, n.w, n.h], onScreen: n.onScreen })),
-    state: { url: viewport.url ?? daemon.lastUrl, title: viewport.title ?? '', docEpoch: epoch, listed: shown.length, visible: kept.length },
+    refs,
+    state: { url: viewport.url ?? daemon.lastUrl, title: viewport.title ?? '', docEpoch: epoch, listed: refs.length, visible: kept.length, truncated: fullText.length > text.length },
   }
 }

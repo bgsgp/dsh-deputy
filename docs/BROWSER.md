@@ -1,215 +1,139 @@
-# BROWSER.md — 浏览器组件（骨架）
+# dsh-deputy/browser：CDP 浏览器控制
 
-`dsh-deputy/browser` 是和 `dsh-deputy/os` 并列的第二个 Cordis 组件：同一个插件包、同一个
-Node 进程、同一份模块实例，但在插件管理器里是独立一行（带自己的开关与状态）。
-骨架按 `context.md` 的十一条设计写；**结构已定，参数与细节留给后续调优（kimi）**。
+当前实现对应插件 **1.3.39**。五个工具和 DSH 0.2.x 插件 ABI 保持不变，浏览器部分不再是只有单标签点击的骨架。
 
-## 0. 这一版做到了什么
+> 本轮按用户要求只完成代码与自检用例，没有启动 DSH、Chrome/Edge 或真实网页做应用级实测。真机验证由使用者执行；不要把本文记录的旧版实测当作本轮验证结果。
 
-真机跑通（Edge headless + CDP）：
+## 1. 五个工具
 
-```
-launchBrowser() → BrowserDaemon.ensureStarted() → navigate('https://www.bilibili.com')
-  → observe(): 可见节点 686，本屏列出 240 行
-  → act({ steps: [{ verb: 'click', ref: 'e4.113' }] })
-  → { ok: true, diff: { urlChanged: true, epochBefore: 4, epochAfter: 7 } }
-```
-
-也就是说「起浏览器 → 导航 → 压成文本快照 → 按 ref 点击 → 回差异」这条主链是真的通的，
-不是 mock。尚未实现的部分集中列在第 6 节。
-
-## 1. 进程模型：daemon + 状态双写
-
-```
-src/browser/launch.mjs   找浏览器、挑空闲端口、带 --remote-debugging-port 启动（独立 user-data-dir）
-src/browser/cdp.mjs      极简 CDP 客户端（Node 22 全局 WebSocket，flatten sessionId 多 target）
-src/browser/daemon.mjs   BrowserDaemon：实例 + target 注册表 + 节点注册表 + docEpoch
-```
-
-- `BrowserDaemon` 是**懒启动**的：`apply()` 时只构造对象并注册工具，第一次
-  `browser_open` / 任何需要页面的动作才真的拉浏览器。
-- 每个任务一个独立 `user-data-dir`（默认 `os.tmpdir()/dsh-deputy-browser-*`），
-  写不写 `state.json` 由 `statePath` 决定（默认不写，避免残留凭据）。
-- 现状：daemon 活在插件进程里。**跨进程常驻**（工具单元格崩了 daemon 还活着）尚未做，
-  见第 6 节。
-
-## 2. 两张注册表与 ref 生命周期
-
-```
-targets: targetId → { sessionId, url, epoch }   // 目前单标签，但表结构按多标签留好
-nodes:   ref      → { backendNodeId, epoch, role, name, box }
-```
-
-- `docEpoch` 在 `Page.frameNavigated` / `DOM.documentUpdated` /
-  `Page.navigatedWithinDocument` 时自增，并清空 `nodes`。
-- ref 的形状是 `e<epoch>.<nodeIndex>`：**代数就在引用里**，一眼能看出它是哪一代文档的。
-- 用 ref 前先比 `node.epoch === daemon.docEpoch`，不等直接 `STALE_REF`，
-  绝不让内核去撞一个已经不存在的节点。
-- 不用 CSS 选择器当句柄（重渲染后可能命中另一个元素，最阴的一类 bug）。
-
-这一条在真机上抓到过一个 bug 并修掉了：原来 ref 里的代数是局部自增计数器（生成
-`e5.113`），而 `docEpoch` 是 4，于是**每次点击都 STALE_REF**。现在 ref 一代一码，
-`test/run-tests.mjs` 有两条回归用例（`resolveRef` 代数不等 → STALE_REF；`runSteps` 遇换代即停）。
-
-## 3. 观察：DOMSnapshot + AX 树压成文本
-
-`src/browser/snapshot.mjs`：`DOMSnapshot.captureSnapshot`（带 computedStyles:
-display/visibility/opacity/cursor/overflow，includeDOMRects/includePaintOrder）一次拿 DOM+布局+样式，
-再用 `Accessibility.getFullAXTree` 补 role/name。
-
-剪枝规则（自上而下，整棵剪）：
-
-- 没有布局 quad、或宽高为 0；
-- `display: none` / `visibility: hidden|collapse` / `opacity: 0` / `aria-hidden="true"`；
-- 标签名在 `html/head/script/style/meta/link/noscript/template`；
-- AX 树标 `ignored` 且没有可读名；
-- 既没有名字、也不可交互（不是 input/textarea/select/a/button）。
-
-排序：视口内优先 → 可交互优先 → 文档序。渲染每行：
-
-```
-[缩进] [e4.113] link "首页" @24,0 52x64
-[缩进] [e4.245] textbox "三角洲行动" = "..." @471,22 230x20
-```
-
-预算：`budget='summary'` 默认按「本屏可见 + 可交互」裁到 240 行左右；
-`within=` 可限定区域二次观察；`budget='full'` 放开。**不要一次全量吐**——
-上下文预算是有限的，观察的目标是「让模型用最少 token 做下一步判断」。
-
-## 4. 动作层：先校验可达，再执行，后取证
-
-`src/browser/act.mjs` 支持 `click / type / key / hover / scroll / press / navigate / wait / reload`。
-
-1. **前置**：`DOM.scrollIntoViewIfNeeded` → `DOM.getBoxModel` 取中心点 →
-   `elementFromPoint` 粗检遮挡（命中文本与 ref 名对不上就给 `overlay` 提示，不硬失败）。
-2. **执行**：`Input.dispatchMouseEvent` 成对按下/抬起；文本走 `Input.insertText`（绕开输入法）；
-   `clear: true` 先 Ctrl+A + Backspace。
-3. **后置（批处理断点）**：`runSteps` 顺序跑，**一旦 `docEpoch` 变了就停**，返回
-   `{ ok: true, stopped: 'document-changed', remaining, diff }`，把新状态交回模型。
-   这条是协议约束，不靠模型自觉。
-
-## 5. 工具契约（5 个）
-
-| 工具 | 参数 | 返回 |
-|---|---|---|
-| `browser_open` | `{url?}` | `{ok, state, url, pid, docEpoch, error?}` |
-| `browser_observe` | `{within?, budget?: summary\|full, types?}` | `{ok, text, refs[], state}` |
-| `browser_act` | `{steps: [...], expect?}` | `{ok, steps, diff, stopped?, error?}` |
-| `browser_status` | `{}` | `{ok, state, pid, port, url, docEpoch, refs}` |
-| `browser_close` | `{}` | `{ok, state}` |
-
-`steps` 里每一项：`{ verb, ref?, text?, key?, url?, deltaY?, ms? }`。
-`output.schema` 用标准 JSON Schema（`required` 数组），`parameters` 是 author 字段表
-（`required` 内联、object 显式 `additionalProperties`）——两套别混，混了真实
-`dsh-tools` 会直接抛 `JsonSchemaError` / `parameters.x.additionalProperties must be explicitly true or false`。
-
-## 5.1 登录态（cookies）与风险
-
-默认 `cookies: 'inherit'`：daemon 启动**之前**，把本机 Edge/Chrome 的登录态复制进它自己的
-`user-data-dir`，这样新实例带着用户已经登录的会话去访问站点。复制逻辑在 `src/browser/cookies.mjs`。
-
-| 文件 | 作用 |
+| 工具 | 作用 |
 |---|---|
-| `<User Data>/Local State` | Chromium 的 cookie 加密密钥（DPAPI 包裹） |
-| `<profile>/Network/Cookies`（+ `-journal` / `-wal` / `-shm`） | cookie 库本体 |
+| `browser_open` | 懒启动插件专用 Chrome/Edge；可选导航当前标签 |
+| `browser_observe` | DOMSnapshot + AX 快照、稳定 ref、盒模型、状态与可选截图 |
+| `browser_act` | 点击、输入、等待、标签、上传下载等顺序动作 |
+| `browser_status` | 进程、URL、epoch、标签数、最近下载与 cookie 数量 |
+| `browser_close` | 关闭插件专用浏览器和 CDP 连接 |
 
-- 源目录：默认按要启动的浏览器自动找（`%LOCALAPPDATA%\Microsoft\Edge\User Data` /
-  `%LOCALAPPDATA%\Google\Chrome\User Data`），可用 `cookiesSource` 显式指定；
-  profile 默认 `auto`（Default 优先，其次 cookie 库最新的）。
-- 复制失败（源不存在、profile 没有 cookie 库、文件被占用）**不阻断启动**：浏览器以未登录
-  状态起，状态里标 `cookies.reason`（`NO_SOURCE` / `NO_PROFILE` / `COPY_FAILED`…）。
-- `user-data-dir` 默认固定在 `%LOCALAPPDATA%\dsh-deputy\browser-profile`（`persistProfile: false`
-  可退回一次性临时目录），所以「在面板里登录一次」能跨启动保留。
+注册统一走 `src/registry.mjs` 的 `tools.register` 适配层。截图走 `attachments.saveImage()`，再由 `output.render` 返回 `image` content block；不会把 base64 字符串伪造成附件引用。
 
-### 风险（请务必知道）
+## 2. 观察与 ref
 
-1. **等于把登录态交给了自动化**：复制进来的 cookie 让 daemon 拥有你本机浏览器的登录身份，
-   模型发起的动作就是「以你本人身份」执行。只在你信任这个插件与当前会话时开启；
-   `cookies: false` 可让 daemon 永远是一个干净的未登录实例。
-2. **凭据会落盘**：cookie 库是整体拷贝，落在本机 `%LOCALAPPDATA%` 下，和主浏览器同等敏感
-   （磁盘被读 = 登录态泄露）。不要把该目录同步/备份到云端。
-3. **App-Bound Encryption 会让继承静默失效**：Chrome 127+ / 较新的 Edge 用应用绑定加密，
-   复制出来的 cookie 库在别的实例里解得开 0 条（本机实测：复制 1.26 MB，
-   `Storage.getCookies` 读到 0 条，页面仍是未登录）。这不是插件坏了，是浏览器的安全边界；
-   此时只能在面板里手动登录一次（profile 会保留），或用企业策略
-   `ApplicationBoundEncryptionEnabled=0` 关闭 ABE（会降低本机安全性，不自动做）。
-4. **有效期与退出不同步**：站点退出登录后，已复制的旧 cookie 仍可能在 daemon 的 profile 里
-   存活到过期；反过来主浏览器新登录也要等下次 daemon 启动才复制。
-5. **调试端点**：`--remote-debugging-port` 只绑 `127.0.0.1`，但本机任意进程都能连；
-   用完 `browser_close`。
+`browser_observe` 返回一行一个节点：
 
-### 怎么确认到底继没继承
+```text
+[e4.42] button "搜索" @820,164 72x32
+```
 
-`browser_open` / `browser_status` 的返回里有 `cookies`：
+- `e4.42`：`epoch=4`、DOM nodeIndex=42。
+- 导航、`DOM.documentUpdated`、标签切换都会换代并清空旧 ref。
+- 动作使用旧 ref 会返回 `STALE_REF`，不会拿旧节点乱点。
+- AX 与 DOM 属性共同生成 `disabled` / `readonly`；禁用或只读目标会被拒绝。
+- `within` 支持当前 ref、元素 id 或区域可读名，并保留命中区域的后代，不再只筛选同名节点。
+- `types` 按 role 过滤；`maxChars` 明确限制文本预算，默认 summary 16000 / full 60000。
+
+截图：
 
 ```json
-{ "inherit": true, "source": "C:\\Users\\…\\Edge\\User Data", "profile": "Default",
-  "bytes": 1262465, "count": 0, "reason": null }
+{
+  "within": null,
+  "budget": "summary",
+  "screenshot": true,
+  "format": "png"
+}
 ```
 
-`count` 是新实例里 `Storage.getCookies` 实际数到的条数，**唯一硬证据**。
-`inherit: true` 且 `count: 0` 就说明撞上第 3 条的 ABE，不要报告成「已登录」。
+## 3. 动作
 
-## 6. 失败分类（返回「下一步」，不是报错文本）
+`steps` 支持：
 
-`src/browser/errors.mjs`，每个码都带 `hint`：
+- 基本：`click`、`type`、`key`、`hover`、`scroll`、`press`、`navigate`、`wait`、`reload`。
+- 等待：`waitFor`，用 `selector` 或当前 `ref` 等元素可见/消失，最长 120 秒。
+- 表单：`select`，按 option `value` 或 `label` 选择；`upload` 接收本机绝对路径数组。
+- 标签：`{verb:"tab",op:"list|new|switch|close"}`，切换使用独立 target/session，后台标签网络不阻塞当前页。
+- 下载：`{verb:"download",ref:"e…"}` 或 `{verb:"download",url:"https://…"}`，等待本次新下载完成。
+- 组合键：如 `Ctrl+A`、`Ctrl+Shift+T`，使用 CDP modifiers 与 keyDown/keyUp。
 
-| code | 含义 | 建议 |
-|---|---|---|
-| `STALE_REF` | ref 属于旧文档 | 重新 `browser_observe` |
-| `DOC_CHANGED` | 文档已换代 | 回锚点或重新导航 |
-| `OVERLAY` | 目标被遮挡 | 先找 close/dismiss/确定 |
-| `AUTH_BLOCKED` | 要求登录/人机验证 | 交还用户 |
-| `NAV_TIMEOUT` | 导航超时 | 先看当前状态 |
-| `AMBIGUOUS_TARGET` | 目标不唯一 | 用 `within=` 或更具体的名收窄 |
-| `NOT_RUNNING` | daemon 没跑 | 先 `browser_open` |
-| `CDP_ERROR` | 协议层报错 | 看 `error.data` 判断是否重 attach |
-| `BAD_ARGS` / `NOT_IMPLEMENTED` | 参数错 / 骨架未实现 | 修正参数；等后续调优 |
+示例：
 
-恢复原则只有一条：**先重新观察再重试**。原样重放会在已经变化的页面上产生幽灵点击。
-
-## 7. 留给调优（kimi）的清单
-
-按 context.md 的条目对：
-
-1. **等待三层**：现在只有「`readyState === 'complete'` + 500ms 静默」轮询，缺
-   `Page.lifecycleEvent` 与 `Network` 计数归零判定；元素级等待（可见 + 可交互 + 超时）完全没做。
-2. **遮挡处理**：`OVERLAY` 只提示不处理；应当自动找 close/dismiss/确定 的语义节点先关掉。
-3. **disabled / 不可交互**：应从 AX properties（`disabled`、`readonly`、`aria-disabled`）判定，
-   现在只查了名字与 role。
-4. **预算裁剪**：summary/full 两档太粗，需要真站 A/B（重表单后台 / 信息流 / SPA）测
-   「每步 token / 成功步占比」，再定剪枝参数与 `within=` 的切块策略。
-5. **`expect` 断言**：现在只做「页面文本包含」的粗判；应升级成结构化断言 + 表单指纹去重
-   （写操作重试前先查上次到底生效没有）。
-6. **多标签 / iframe / 上传下载**：`targets` 表留了字段但没实现切换；iframe 未穿透。
-7. **跨进程常驻 daemon**：现在 daemon 在插件进程内；按 context.md 应当独立进程 + 本地端口，
-   工具只是客户端，插件重启不丢会话。
-8. **安全边界**：凭据脱敏（Cookie/Authorization 不进日志与上下文）、页面文本标记为「内容而非指令」、
-   动作分级（读/轻写/重写/不可逆，后两级要确认令牌）都还没做。
-9. **会话快照恢复**：`state.json` 只留了写入钩子，没有恢复逻辑。
-10. **失败重试策略**：哪些码可自动重试一次（`NAV_TIMEOUT`？`STALE_REF` 重观察后？）
-    需要按站点实测再定，不要在骨架里猜。
-
-## 8. 自己怎么验
-
-```bash
-node test/run-tests.mjs        # 35 项，含浏览器工具的 schema / 失败信封 / ref 代数 / 登录态复制回归
-node scripts/check-plugin.mjs  # 含「两个组件」「browser 5 工具」「状态总线」三段
+```json
+{
+  "steps": [
+    { "verb": "waitFor", "selector": "form input[name=q]", "timeoutMs": 10000 },
+    { "verb": "type", "ref": "e4.42", "text": "dsh", "clear": true },
+    { "verb": "key", "key": "Enter" }
+  ],
+  "expect": { "urlIncludes": "search", "text": "dsh" },
+  "idempotencyKey": "search-dsh-001"
+}
 ```
 
-真机探针（会真的拉一个 headless Edge，跑完自动关）：
+### 等待与差异
 
-```js
-import { BrowserDaemon } from 'dsh-deputy/browser/daemon.mjs'
-const d = new BrowserDaemon({ headless: true })
-await d.ensureStarted()
-await d.navigate('https://www.bilibili.com')
-const snap = await d.observe({ budget: 'summary' })
-console.log(snap.state, snap.text.split('\n').slice(0, 6).join('\n'))
-const ref = snap.refs.find((r) => r.role === 'link' && r.name)
-console.log(await d.act({ steps: [{ verb: 'click', ref: ref.ref }] }))
-await d.close()
+- 导航等待：`document.readyState=complete`、当前 target 无在途请求、网络静默期同时满足。
+- 元素等待：CSS 选择器或 ref 的盒子可见且非 disabled。
+- 动作后等待：取换代、URL 变化、DOM/网络静默、预期文本中的第一个有效信号；等待超时不等于动作失败。
+- 文档换代会停止批次，返回已执行步骤、剩余步数和新旧 epoch，调用方必须重新观察。
+
+### 遮挡与高风险动作
+
+点击前用 `DOM.resolveNode` + `elementFromPoint` 比较真实命中节点。目标被遮挡时默认返回 `OVERLAY`，不再继续点击目标。
+
+自动遮挡处理只查找可见对话框中明确的 `close/dismiss/cancel/关闭/取消/知道了` 等控件；不会把“确定、支付、发布、删除”当作关闭按钮。可用 `dismissOverlay:false` 完全关闭自动处理。
+
+标记为 `risk:"external"` 或 `risk:"irreversible"` 的步骤必须同时带 `confirmed:true`，否则返回 `CONFIRM_REQUIRED`。调用方只能在用户明确批准后设置该标记；它不是绕过人工确认的依据。
+
+`idempotencyKey` 对进行中和最近 50 条结果去重。相同 key 返回首次结果和 `deduped:true`，避免网络重试造成表单重复提交；不同的独立操作必须使用不同 key。
+
+## 4. 多标签、下载与状态恢复
+
+- `Target.getTargets/attachToTarget/createTarget/closeTarget` 管理 page target。
+- 同一 CDP WebSocket 用 flatten session 复用，多标签不会互相覆盖 `pageSession`。
+- 下载目录默认 `%LOCALAPPDATA%/dsh-deputy/downloads`；`browser_status.downloads` 只暴露元数据，不暴露 cookie。
+- 状态默认原子写入 `%LOCALAPPDATA%/dsh-deputy/browser-state.json`。
+- Chrome/Edge 启动带 `--restore-last-session`；异常退出后先按 targetId、再按脱敏 URL 尝试找回活动标签。
+- state 文件中的 URL 会去掉 query/hash，避免把常见登录令牌落盘。主动 `browser_close` 不用于恢复。
+- CDP 断线或浏览器进程退出后，下一次调用会重连或重启，不再仅凭旧对象误报 `running`。
+
+## 5. 登录态与风险
+
+默认配置仍为 `cookies:'inherit'`、`cookiesProfile:'auto'`、`persistProfile:true`。启动前从本机 Edge/Chrome 复制 cookie 库与 Local State 到插件独立 profile；不需要、也不应把 cookie 内容打印给模型。
+
+**风险：继承 cookie 等于让插件浏览器获得这些站点的登录态。它可能以你的身份读取页面或执行你明确批准的操作。只应操作可信站点，用完关闭插件浏览器；不要在共享机器上默认开启。**
+
+`browser_status.cookies.count` 通过 `Storage.getCookies` 报告实际有效条数，不输出 cookie 名称、值或数据库内容。复制到字节数不等于登录成功。
+
+历史真机记录：本机 Edge 的 App-Bound Encryption 曾导致复制约 1.26 MB 后实际读到 0 条 cookie。因此旧版“已复制文件”不能作为继承成功证据；必须看有效条数和目标站实际登录状态。
+
+远程调试端口虽只绑定本机回环地址，本机其他进程仍可能访问它。不要把它改成公网地址，不要把插件 profile 当日常浏览器使用。
+
+## 6. 文件
+
+```text
+src/browser.mjs          组件配置、懒启动、附件与状态总线
+src/browser/daemon.mjs   生命周期、多标签、网络/下载事件、恢复、幂等
+src/browser/cdp.mjs      CDP WebSocket、flatten session、断线处理
+src/browser/launch.mjs   独立 profile、端口选择、进程启动与恢复
+src/browser/snapshot.mjs DOM+AX、ref、within、预算与状态
+src/browser/act.mjs      动作、遮挡、组合键、上传下载、expect
+src/browser/wait.mjs     导航/元素/动作后三层等待
+src/browser/tools.mjs    五工具 schema、注册与图片 render
+src/browser/errors.mjs   统一 {code,message,hint}
+src/browser/cookies.mjs  登录态文件复制（不读取 cookie 内容）
 ```
 
-注意：`browser_open` 用的是**独立** `user-data-dir`，不会写坏主浏览器的 profile；
-cookie 是只读复制（风险见 5.1）。每次工具调用都从新快照开始，旧 ref 一律作废。
+## 7. 验证与已知边界
+
+`test/run-tests.mjs` 现有 50 项自检，其中浏览器新增覆盖：网络静默、禁用控件、遮挡阻断、高风险确认、多标签换代、幂等、下载记录和截图附件。`scripts/check-plugin.mjs` 同时检查五工具、author 参数表、output schema 和 DSH 注册签名。本轮未执行这些测试，需由使用者运行：
+
+```powershell
+node test/run-tests.mjs
+node scripts/check-plugin.mjs
+```
+
+已知边界：
+
+- 快照以主 frame 为主，尚未完整穿透 OOPIF/跨域 iframe；不能把主 frame ref 当作 iframe 内节点使用。
+- `within` 的区域名匹配可能有歧义，优先使用当前 ref 或元素 id。
+- 下载完成以 CDP 事件为准；浏览器自动改名且磁盘路径无法确认时，结果中的 `path` 可能为 `null`，但保留文件名和字节数。
+- 状态恢复是 best effort，不保证 Chrome 在每个异常退出场景都恢复全部标签。
+- 本轮没有真实网页、上传下载或 cookie 登录实测；首次使用应先在无风险测试站验证，再用于真实账号。

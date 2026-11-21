@@ -1,229 +1,182 @@
-// 浏览器组件的工具面（context.md 第 9 条：observe / act 两个就够，其余是生命周期与诊断）
-//
-// 0.2.2 的两套 schema 别混：
-//   parameters = author 字段表（required 内联到字段上，object 必须显式 additionalProperties）
-//   output.schema = 标准 JSON Schema（required 是数组）
-import { text } from '../registry.mjs'
-import { wireError } from './errors.mjs'
+// 五个固定工具：open / observe / act / status / close。
+// 注册走 src/registry.mjs 的 DSH 0.2.x 公共适配层，不能绕过 tools.register。
+import { errorCodeOf, wireError } from './errors.mjs'
+import { registerTools, text } from '../registry.mjs'
 
-const refSchema = {
-  type: 'object',
-  additionalProperties: true,
+const imageSchema = {
+  type: 'object', additionalProperties: true,
+  required: ['attachmentId', 'mediaType', 'bytes', 'width', 'height', 'name'],
   properties: {
-    ref: { type: 'string' },
-    role: { type: 'string' },
-    name: { type: 'string' },
-    box: { type: 'array', items: { type: 'number' } },
-    onScreen: { type: 'boolean' },
+    attachmentId: { type: 'string' }, mediaType: { type: 'string' }, bytes: { type: 'number' },
+    width: { type: 'number' }, height: { type: 'number' }, name: { type: 'string' },
   },
 }
 
 const stepSchema = {
   type: 'object',
-  additionalProperties: true,
+  additionalProperties: false,
+  required: ['verb'],
   properties: {
-    verb: { type: 'string', enum: ['click', 'type', 'key', 'hover', 'scroll', 'navigate', 'wait', 'reload', 'press'] },
-    ref: { type: 'string' },
+    verb: {
+      type: 'string',
+      enum: ['click', 'type', 'key', 'hover', 'scroll', 'press', 'navigate', 'wait', 'waitFor', 'reload', 'select', 'tab', 'upload', 'download'],
+      description: 'tab 用 op=list/new/switch/close；download 等待完成；waitFor 等 selector/ref 可见',
+    },
+    ref: { type: 'string', description: '当前 observe 返回的 e<epoch>.<nodeIndex>' },
     text: { type: 'string' },
-    key: { type: 'string' },
+    clear: { type: 'boolean', description: 'type 前 Ctrl+A + Backspace 清空' },
     url: { type: 'string' },
+    ms: { type: 'integer' },
+    timeoutMs: { type: 'integer', description: 'waitFor/download 超时，最大 120000ms' },
+    holdMs: { type: 'integer' },
+    settleMs: { type: 'integer' },
+    key: { type: 'string', description: 'Enter、Escape、Tab、Ctrl+A、Ctrl+Shift+T 等' },
     deltaY: { type: 'number' },
-    ms: { type: 'number' },
+    deltaX: { type: 'number' },
+    x: { type: 'number' },
+    y: { type: 'number' },
+    clicks: { type: 'integer', description: '点击次数 1..3' },
+    button: { type: 'string', enum: ['left', 'right'] },
+    dismissOverlay: { type: 'boolean', default: true, description: '遮挡时仅自动点击明确的关闭/取消控件，不点确定' },
+    selector: { type: 'string', description: 'waitFor 的 CSS 选择器；expect 也支持 selector' },
+    visible: { type: 'boolean', default: true },
+    value: { type: 'string', description: 'select option value' },
+    label: { type: 'string', description: 'select option label' },
+    op: { type: 'string', enum: ['list', 'new', 'switch', 'close'] },
+    targetId: { type: 'string' },
+    files: { type: 'array', items: { type: 'string' }, description: 'upload 的本机绝对路径数组' },
+    risk: { type: 'string', enum: ['read', 'write', 'external', 'irreversible'] },
+    confirmed: { type: 'boolean', description: '仅用户明确批准后，external/irreversible 步骤才可设 true' },
   },
 }
 
-const cookiesSchema = {
-  type: 'object',
-  additionalProperties: true,
-  properties: {
-    inherit: { type: 'boolean' },
-    source: { type: 'string' },
-    profile: { type: 'string' },
-    bytes: { type: 'number' },
-    count: { type: 'number' },
-    reason: { type: 'string' },
-  },
-}
+const jsonRender = (_args, value) => text(JSON.stringify(value ?? { ok: true }, null, 2))
 
-const errorSchema = {
-  type: 'object',
-  additionalProperties: true,
-  properties: { code: { type: 'string' }, message: { type: 'string' }, hint: { type: 'string' } },
-}
+export function browserToolSpecs(daemon, { saveImage = null } = {}) {
+  const observe = async (args) => {
+    const result = await daemon.observe({
+      within: args.within ?? null,
+      budget: args.budget ?? 'summary',
+      types: args.types ?? null,
+      maxChars: args.maxChars ?? null,
+    })
+    if (args.screenshot) {
+      const image = await daemon.screenshot({ format: args.format ?? 'png' })
+      if (saveImage) {
+        result.image = await saveImage({
+          data: Buffer.from(image.base64, 'base64'),
+          mediaType: image.format === 'jpeg' ? 'image/jpeg' : 'image/png',
+          name: `dsh-browser-${Date.now()}.${image.format === 'jpeg' ? 'jpg' : 'png'}`,
+          width: image.width,
+          height: image.height,
+        })
+      } else {
+        // MCP/无 attachments 环境仍可使用；DSH render 不会把 base64 伪造成 ImageAttachmentRef。
+        result.image = image
+        result.screenshotNotice = '当前没有 attachments.saveImage，截图只以 base64 数据返回'
+      }
+    }
+    return result
+  }
 
-/** 把登录态继承结果压成一句话；没继承到就明说原因，不粉饰。 */
-function cookieNote(c) {
-  if (!c) return ''
-  if (c.inherit && typeof c.count === 'number') return ` · 登录态：${c.count} 个 cookie（源自 ${c.profile ?? '本机 profile'}）`
-  if (c.inherit) return ` · 登录态：已复制（源自 ${c.profile ?? '本机 profile'}），数量未知`
-  return ` · 登录态：未继承${c.reason ? `（${c.reason}）` : ''}`
-}
-
-export function browserToolSpecs(daemon, options = {}) {
-  const log = options.log ?? (() => {})
   return [
     {
-      name: 'browser_open',
-      description: '起一个独立浏览器实例（独立 user-data-dir + CDP），可选直接导航到 url。骨架阶段单标签。',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: '启动后直接打开的地址' },
-        },
-      },
-      outputSchema: {
-        type: 'object',
-        additionalProperties: true,
-        required: ['ok'],
-        properties: {
-          ok: { type: 'boolean' },
-          state: { type: 'string' },
-          url: { type: 'string' },
-          pid: { type: 'number' },
-          docEpoch: { type: 'number' },
-          cookies: cookiesSchema,
-          error: errorSchema,
-        },
-      },
-      render: (_a, v) => text(v?.ok ? `浏览器 ${v.state ?? 'running'} · ${v.url ?? 'about:blank'}${cookieNote(v?.cookies)}` : `打开失败（${v?.error?.code ?? 'unknown'}）：${v?.error?.message ?? ''}`),
+      name: 'browser_open', title: 'DSH · 打开浏览器', category: 'desktop', concurrencySafe: false,
+      description: '启动或接入插件专用 Chrome/Edge。独立 profile，不并入用户日常窗口。只传 url 导航当前标签；新标签用 browser_act 的 tab/new。',
+      inputSchema: { type: 'object', properties: { url: { type: 'string', description: '初始 URL，可选' } }, required: [] },
+      outputSchema: { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, url: { type: 'string' } } },
+      render: jsonRender,
       handler: async (args) => {
-        try {
-          const status = await daemon.ensureStarted()
-          // 复制成功但一个 cookie 都读不出来，说明撞上 App-Bound Encryption：如实提示，不假装已登录
-          if (status?.cookies?.inherit && status.cookies.count === 0) {
-            log('[dsh-deputy/browser] 已复制本机 cookie 库，但新实例读到 0 个 cookie（浏览器启用了 App-Bound Encryption，见 docs/BROWSER.md）')
-          }
-          if (typeof args?.url === 'string' && args.url.trim()) await daemon.navigate(args.url.trim())
-          return { ok: true, ...daemon.status(), state: status.state }
-        } catch (e) {
-          log(`[dsh-deputy/browser] open 失败：${e?.message}`)
-          return { ok: false, ...wireError(e) }
-        }
+        const status = await daemon.ensureStarted()
+        if (args.url) await daemon.navigate(args.url)
+        return { ok: true, ...status, ...(args.url ? { url: args.url } : {}) }
       },
     },
     {
-      name: 'browser_observe',
-      description: '一次往返拿页面结构快照：indent + [ref] + role + 名字 + 盒子。后续动作用这些 ref，不要用 CSS 选择器。',
-      concurrencySafe: true,
+      name: 'browser_observe', title: 'DSH · 浏览器观察', category: 'desktop', concurrencySafe: false,
+      description: '返回可见 DOM+AX 快照（ref、语义、盒模型、disabled/readonly、on-screen、URL、epoch）。within 支持 ref/id/区域名并包含后代；maxChars 控制预算。screenshot=true 时通过 saveImage 返回图片块。',
       inputSchema: {
         type: 'object',
         properties: {
-          within: { type: 'string', description: '只看某个区域：匹配 id 或可读名' },
-          budget: { type: 'string', enum: ['summary', 'full'], description: 'summary=视口内明细，full=全部节点' },
-          types: { type: 'array', items: { type: 'string' }, description: '只要这些 role' },
+          within: { type: 'string', description: '当前 ref、元素 id 或区域可读名' },
+          budget: { type: 'string', enum: ['summary', 'full'] },
+          types: { type: 'array', items: { type: 'string' }, description: '只保留指定 role' },
+          maxChars: { type: 'integer', description: '1000..120000，默认 summary 16000 / full 60000' },
+          screenshot: { type: 'boolean', default: false },
+          format: { type: 'string', enum: ['png', 'jpeg'], default: 'png' },
         },
+        required: [],
       },
       outputSchema: {
-        type: 'object',
-        additionalProperties: true,
-        required: ['ok'],
+        type: 'object', additionalProperties: true,
         properties: {
-          ok: { type: 'boolean' },
-          text: { type: 'string' },
-          refs: { type: 'array', items: refSchema },
-          state: { type: 'object', additionalProperties: true },
-          error: errorSchema,
+          ok: { type: 'boolean' }, text: { type: 'string' }, state: { type: 'object', additionalProperties: true },
+          refs: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          image: imageSchema,
         },
       },
-      render: (_a, v) => (v?.ok ? text(v.text ?? '(空快照)') : text(`观察失败（${v?.error?.code ?? 'unknown'}）：${v?.error?.message ?? ''}`)),
-      handler: async (args) => {
-        try {
-          return await daemon.observe({ within: args?.within ?? null, budget: args?.budget ?? 'summary', types: args?.types ?? null })
-        } catch (e) {
-          log(`[dsh-deputy/browser] observe 失败：${e?.message}`)
-          return { ok: false, ...wireError(e) }
-        }
+      render: (_args, value) => {
+        const blocks = text(value?.text ?? JSON.stringify(value ?? {}, null, 2))
+        if (value?.image?.attachmentId) blocks.push({ type: 'image', attachment: value.image })
+        return blocks
       },
+      handler: observe,
     },
     {
-      name: 'browser_act',
-      description: '按 ref 顺序执行动作（click/type/key/hover/scroll/navigate/wait/reload/press）；页面结构一变就停下并回差异。',
+      name: 'browser_act', title: 'DSH · 浏览器动作', category: 'desktop', concurrencySafe: false,
+      description: [
+        '按顺序执行 click/type/key/hover/scroll/press/navigate/wait/waitFor/reload/select/tab/upload/download。',
+        'ref 跨 epoch 或标签切换后失效，重新 observe。遮挡会阻断点击；只自动关闭明确的关闭/取消控件。',
+        'expect={text,urlIncludes,selector}；external/irreversible 步骤必须经用户批准后 confirmed=true。',
+        'idempotencyKey 相同会返回首次结果，避免表单重复提交。',
+      ].join('\n'),
       inputSchema: {
         type: 'object',
         properties: {
-          steps: { type: 'array', items: stepSchema, description: '要顺序执行的动作' },
-          expect: {
-            type: 'object',
-            additionalProperties: true,
-            description: '动作后必须出现的文本（写动作的断言，失败即回滚决策）',
-          },
+          steps: { type: 'array', items: stepSchema },
+          expect: { type: 'object', additionalProperties: true, description: '{text,urlIncludes,selector}；其余键按旧版文本断言处理' },
+          idempotencyKey: { type: 'string', description: '写操作幂等键；进行中与最近 50 条结果去重' },
         },
         required: ['steps'],
       },
-      outputSchema: {
-        type: 'object',
-        additionalProperties: true,
-        required: ['ok'],
-        properties: {
-          ok: { type: 'boolean' },
-          steps: { type: 'array', items: { type: 'object', additionalProperties: true } },
-          diff: { type: 'object', additionalProperties: true },
-          snapshot: { type: 'string' },
-          stopped: { type: 'string' },
-          error: errorSchema,
-        },
-      },
-      render: (_a, v) => {
-        if (v?.ok) {
-          const n = Array.isArray(v.steps) ? v.steps.length : 0
-          return text(`执行 ${n} 个动作${v.stopped ? `（在 ${v.stopped} 处停下）` : ''}${v.diff?.url ? ` · 现在在 ${v.diff.url}` : ''}`)
-        }
-        return text(`动作失败（${v?.error?.code ?? 'unknown'}）：${v?.error?.message ?? ''}${v?.error?.hint ? `\n建议：${v.error.hint}` : ''}`)
-      },
-      handler: async (args) => {
-        try {
-          return await daemon.act({ steps: args?.steps ?? [], expect: args?.expect ?? null })
-        } catch (e) {
-          log(`[dsh-deputy/browser] act 失败：${e?.message}`)
-          return { ok: false, ...wireError(e) }
-        }
-      },
+      outputSchema: { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, steps: { type: 'array', items: { type: 'object', additionalProperties: true } } } },
+      render: jsonRender,
+      handler: (args) => daemon.act(args),
     },
     {
-      name: 'browser_status',
-      description: '看浏览器 daemon 的状态（是否在跑、pid、端口、当前 target/epoch、最近错误）。',
-      concurrencySafe: true,
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      outputSchema: {
-        type: 'object',
-        additionalProperties: true,
-        required: ['ok'],
-        properties: {
-          ok: { type: 'boolean' },
-          state: { type: 'string' },
-          pid: { type: 'number' },
-          port: { type: 'number' },
-          url: { type: 'string' },
-          docEpoch: { type: 'number' },
-          refs: { type: 'number' },
-          cookies: cookiesSchema,
-          error: { type: 'string' },
-        },
-      },
-      render: (_a, v) =>
-        text(
-          `浏览器 ${v?.state ?? 'unknown'}${v?.pid ? ` · pid ${v.pid}` : ''}${v?.port ? ` · :${v.port}` : ''}${cookieNote(v?.cookies)}${v?.error ? ` · ${v.error}` : ''}`,
-        ),
-      handler: async () => ({ ok: true, ...daemon.status() }),
+      name: 'browser_status', title: 'DSH · 浏览器状态', category: 'desktop', concurrencySafe: true,
+      description: '查看运行状态、当前 URL/epoch/ref 数、标签数、最近下载和 cookie 有效条数。cookie 只报告数量，不输出内容。',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: { type: 'object', additionalProperties: true },
+      render: jsonRender,
+      handler: () => daemon.status(),
     },
     {
-      name: 'browser_close',
-      description: '关掉浏览器实例并清理 daemon（独立 user-data-dir 会保留，下次可复用或手动删）。',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      outputSchema: {
-        type: 'object',
-        additionalProperties: true,
-        required: ['ok'],
-        properties: { ok: { type: 'boolean' }, state: { type: 'string' }, error: errorSchema },
-      },
-      render: (_a, v) => text(v?.ok ? '浏览器已关闭' : '关闭失败'),
+      name: 'browser_close', title: 'DSH · 关闭浏览器', category: 'desktop', concurrencySafe: false,
+      description: '关闭插件专用浏览器、CDP 连接和标签状态。异常关闭后的 target 恢复依赖 statePath；主动 close 不恢复。',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: { type: 'object', additionalProperties: true, properties: { ok: { type: 'boolean' }, state: { type: 'string' } } },
+      render: jsonRender,
       handler: async () => {
-        try {
-          return await daemon.close()
-        } catch (e) {
-          return { ok: false, ...wireError(e) }
-        }
+        await daemon.close()
+        return { ok: true, state: 'stopped' }
       },
     },
   ]
+}
+
+/** 统一注册与错误信封；返回未注册 spec，方便无 tools 服务时降级。 */
+export function registerBrowserTools(ctx, daemon, { saveImage = null, log = null } = {}) {
+  const specs = browserToolSpecs(daemon, { saveImage }).map((spec) => ({
+    ...spec,
+    handler: async (args, exec) => {
+      try {
+        return await spec.handler(args ?? {}, exec)
+      } catch (e) {
+        log?.(`[browser] ${spec.name}: ${errorCodeOf(e)} ${e.message}`)
+        return { ok: false, ...wireError(e) }
+      }
+    },
+  }))
+  return registerTools(ctx, specs, log ?? (() => {}))
 }

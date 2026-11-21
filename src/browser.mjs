@@ -1,31 +1,28 @@
-// dsh-deputy/browser 组件入口：浏览器操作骨架（设计依据 C:/Users/LJL/Desktop/context.md）
+// dsh-deputy/browser 组件入口：CDP 浏览器控制。
 //
 // 这个包在插件管理器里是两行组件：
 //   dsh-deputy/os      → src/os.mjs      （隔离桌面，四个 deputy_* 工具 + 面板端点）
 //   dsh-deputy/browser → 本文件          （CDP daemon，browser_* 五个工具）
 //
-// 骨架范围（MVP 阶段一，调优交给 kimi，见 docs/BROWSER.md）：
-//   - 独立 user-data-dir 起浏览器、CDP 连接、单标签 attach；
-//   - DOMSnapshot + AX 树合成一行一节点的观察文本，ref = 生成 epoch + 节点序号；
-//   - ref 上的 click / type / key / hover / scroll / navigate / press；
-//   - docEpoch 变化即让旧 ref 失效（STALE_REF），批处理遇变化即停；
-//   - 失败统一 { code, message, hint }。
+// 浏览器半：独立 profile、DOM+AX 快照、epoch ref、结构化等待、遮挡检查、
+// 多标签、上传下载、截图附件、幂等写操作与异常状态恢复。
 import path from 'node:path'
 import { BrowserDaemon } from './browser/daemon.mjs'
 import { findUserDataDir } from './browser/cookies.mjs'
-import { browserToolSpecs } from './browser/tools.mjs'
-import { registerTools } from './registry.mjs'
+import { registerBrowserTools } from './browser/tools.mjs'
 import { setBrowserStatus } from './status.mjs'
 
 export const name = 'dsh-deputy/browser'
-export const inject = ['tools']
+export const inject = ['tools', 'attachments']
 
 export const config = {
   enabled: true,
   exe: null,
   headless: false,
   userDataDir: null,
-  statePath: null,
+  statePath: null, // null = %LOCALAPPDATA%/dsh-deputy/browser-state.json；false = 禁用恢复
+  downloadDir: null, // null = %LOCALAPPDATA%/dsh-deputy/downloads
+  restoreState: true,
   // 登录态：默认继承本机 Edge/Chrome 的 cookie（复制进临时 profile）。
   // 'inherit' | false；风险与实现见 docs/BROWSER.md「登录态与风险」。
   cookies: 'inherit',
@@ -59,27 +56,36 @@ export function apply(ctx = {}) {
     log('[dsh-deputy/browser] 没找到本机 Edge/Chrome 的 User Data，浏览器将以未登录状态启动')
   }
 
-  const profileDir =
-    cfg.userDataDir ??
-    (cfg.persistProfile === false
-      ? null
-      : path.join(process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? '', 'AppData/Local'), 'dsh-deputy', 'browser-profile'))
+  const dataDir = path.join(process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? '', 'AppData/Local'), 'dsh-deputy')
+  const profileDir = cfg.userDataDir ?? (cfg.persistProfile === false ? null : path.join(dataDir, 'browser-profile'))
+  const statePath = cfg.statePath === false ? null : cfg.statePath ?? path.join(dataDir, 'browser-state.json')
 
   const daemon = new BrowserDaemon({
     exe: cfg.exe ?? null,
     headless: cfg.headless ?? false,
     userDataDir: profileDir,
-    statePath: cfg.statePath ?? null,
+    statePath,
+    downloadDir: cfg.downloadDir ?? path.join(dataDir, 'downloads'),
+    restoreState: cfg.restoreState !== false,
     loginState,
   })
   state.daemon = daemon
   setBrowserStatus({ state: 'stopped', running: false, error: null })
 
-  const sink = registerTools(ctx, browserToolSpecs(daemon, { log }), log)
+  const saveImage = ctx.attachments?.saveImage?.bind(ctx.attachments) ?? null
+  if (!saveImage) log('[dsh-deputy/browser] attachments.saveImage 不可用，观察截图只回 base64 数据')
+  const sink = registerBrowserTools(ctx, daemon, { saveImage, log })
   if (sink.length) log(`[dsh-deputy/browser] 没有可用的 tools.register，${sink.length} 个工具未挂载`)
+
+  const heartbeat = setInterval(() => {
+    const current = daemon.status()
+    setBrowserStatus({ state: current.state, running: current.state === 'running', error: current.error })
+  }, 5000)
+  heartbeat.unref()
 
   // 浏览器是懒启动：注册时不弹窗口，第一次 browser_open/observe 才真的起进程。
   ctx.effect(() => () => {
+    clearInterval(heartbeat)
     const closing = daemon.close().catch(() => {})
     setBrowserStatus({ state: 'stopped', running: false, error: null })
     return () => void closing
