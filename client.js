@@ -1,5 +1,5 @@
 /**
- * dsh-deputy 的客户端半：把隔离桌面做成 DSH「应用」侧栏里的一页，并在那条侧栏行右侧挂一个状态点。
+ * dsh-deputy 的客户端半：把隔离桌面做成 DSH「应用」侧栏里的一页，并在那条行的图标旁挂一个状态点。
  *
  * 契约（对齐 @deepseek-ai/dsh-client-modules 的 lazy-CJS factory）：
  *  - 本脚本被执行时只做一件事：window.__ModuleLoader__.load({ id, factory })。
@@ -14,8 +14,9 @@
  *    侧栏自己渲染行、管选中和 More 菜单，插件只提供 id/顺序/文字/图标。
  *  - main：keyed 槽，注册项 = { name, key } + 页面组件；key 必须等于侧栏 id。
  *    点侧栏行 → ctx.layout.selectPanel(id) → 中央区切到这一页（本插件不直接调 layout）。
- *  - 行内没有「尾部插槽」，所以状态点是从图标组件里绝对定位出去的：
- *    最近的定位祖先是侧栏自己的 .panelEntry(position:relative)，right:7px 就是那一行的右端。
+ *  - 行右端 0..28px 是侧栏自己的 unpin（大头针）按钮（.panelUnpin，position:absolute;right:0，
+ *    仅 hover/focus 时 opacity:1）。行内没有「尾部插槽」，所以状态点**不贴行右端**，
+ *    而是内联在图标右侧（.ddp-glyph 里的 .ddp-dot），随 glyph 走，永远不会和大头针重叠。
  * 数据面走宿主起的 127.0.0.1:17872，见 src/viewer.mjs。
  */
 window.__ModuleLoader__.load({
@@ -58,15 +59,13 @@ window.__ModuleLoader__.load({
 .ddp-empty .ddp-actions{display:flex;gap:8px;justify-content:center;margin-top:14px;flex-wrap:wrap}
 .ddp-foot{flex:none;display:flex;align-items:center;gap:10px;padding:7px 14px;
   border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;opacity:.85}
-/* 侧栏状态点：在图标组件里绝对定位，祖先是侧栏行的 .panelEntry(position:relative) */
-.ddp-dot{position:absolute;right:7px;top:50%;margin-top:-3px;width:6px;height:6px;border-radius:50%;
-  pointer-events:none;transition:background-color .2s ease,opacity .15s ease;
-  box-shadow:0 0 0 2px var(--dsw-alias-bg-layer-1)}
+/* 侧栏状态点：内联在图标右边（不贴行右端 —— 行右端 0..28px 是大头针的地盘） */
+.ddp-glyph{display:inline-flex;align-items:center;gap:4px;line-height:0}
+.ddp-dot{flex:none;width:6px;height:6px;border-radius:50%;pointer-events:none;
+  transition:background-color .2s ease}
 .ddp-dot[data-level="running"]{background:#22c55e}
 .ddp-dot[data-level="error"]{background:#ef4444}
 .ddp-dot[data-level="idle"]{background:#9ca3af}
-/* 悬停时侧栏会显示 unpin 按钮，点让位 */
-.panelEntry:hover .ddp-dot{opacity:0}
 `
 
     const CSS_ID = 'dsh-deputy/viewer.css'
@@ -157,7 +156,7 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 侧栏图标：显示器 + 指针 + 行右端状态点。收 { size, active }，用 currentColor 跟随主题。
+     * 侧栏图标：显示器 + 指针 + 紧挨着的小状态点。收 { size, active }，用 currentColor 跟随主题。
      * @param {{size?: number, active?: boolean}} props
      */
     function DeputyIcon(props) {
@@ -182,7 +181,7 @@ window.__ModuleLoader__.load({
       )
       return h(
         'span',
-        { style: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center' } },
+        { className: 'ddp-glyph' },
         h(
           'svg',
           {

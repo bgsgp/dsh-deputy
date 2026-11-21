@@ -139,7 +139,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 - 桌面里还没窗口时（`NOWINDOW`）不再给一张全黑图，而是提示 + 「启动 Edge / 启动记事本」按钮；
 - 这页不是浮窗，也不占会话；切回对话在侧栏点一下即可。
 
-行右侧还有一个小状态点，读 `/api/status`（两个组件共用一条状态总线）：
+图标紧右边还有一个小状态点（不贴行右端，避开悬停出现的大头针），读 `/api/status`（两个组件共用一条状态总线）：
 **绿 = 有桌面/浏览器在跑，红 = 最近一次操作失败，灰 = 都没开**。
 
 0.2.x 的挂载点是 `sidebar.panellist`（侧栏行）+ `main`（同 key 的整页），细节见 [docs/VIEWER.md](docs/VIEWER.md)。

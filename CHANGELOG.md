@@ -2,6 +2,16 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.34
+
+### 侧栏状态点挪到图标旁边
+- 之前的状态点是 `position:absolute;right:7px`，落在侧栏那一行的最右端；而侧栏自己的
+  unpin（大头针）按钮正是 `.panelUnpin{position:absolute;right:0;width:28px}`，悬停时两者重叠。
+- 现在状态点内联进图标容器（`.ddp-glyph` = 图标 + 4px gap + 6px 圆点），随 glyph 走，
+  不再碰行右端；窄栏（36px 图标座）时也仍是图标右侧一点。删掉「悬停隐藏状态点」的补偿规则。
+- `check-plugin` 增加防回退断言：必须出现 `ddp-glyph`，且不得再出现 `position:absolute;right:7px`
+  或 `.panelEntry:hover`。
+
 ## 1.3.33
 
 ### 一个包拆成两个组件（插件管理器里两行）

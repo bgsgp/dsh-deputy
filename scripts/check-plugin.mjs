@@ -168,6 +168,11 @@ if (clientRel && exists(clientRel)) {
   src.includes("'main'") ? ok('client.js 注册 main 页') : bad('client.js 未注册 main 页')
   src.includes('DSH操作电脑') ? ok('client.js 侧栏名 = DSH操作电脑') : bad('client.js 侧栏名不是 DSH操作电脑')
   src.includes('shell.overlay') ? bad('client.js 仍挂 shell.overlay（应改为侧栏入口）') : ok('client.js 不再挂 shell.overlay')
+  // 状态点必须内联在图标旁：行右端 0..28px 属于 unpin（大头针），绝对定位会重叠。
+  src.includes('ddp-glyph') ? ok('client.js 状态点内联在图标旁（ddp-glyph）') : bad('client.js 缺少 ddp-glyph，状态点位置不明')
+  src.includes('position:absolute;right:7px') || src.includes('.panelEntry:hover')
+    ? bad('client.js 状态点仍绝对定位到行右端（会和大头针重叠）')
+    : ok('client.js 状态点不再占用行右端')
   src.includes("exports.inject") ? ok('client.js 声明 exports.inject') : warn('client.js 未声明 exports.inject')
 }
 

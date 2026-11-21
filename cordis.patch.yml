@@ -4,7 +4,7 @@
 #   dsh-deputy/os      → src/os.mjs      隔离桌面 + 桌面面板端点 + deputy_* 四个工具
 #   dsh-deputy/browser → src/browser.mjs 浏览器操作骨架（CDP daemon）+ browser_* 五个工具
 # insert 的 name 走 package.json 的 exports 子路径；插件入口就是各自的 apply(ctx)。
-# dsh.client 指向浏览器半 client.js（侧栏「DSH操作电脑」一页 + 行右侧状态点）。
+# dsh.client 指向浏览器半 client.js（侧栏「DSH操作电脑」一页 + 图标旁的状态点）。
 # 本插件不依赖任何外部 npm 包（diff/sheet/png/roi/budget/runner/desktop/browser 均为纯 ESM），
 # 因此不需要构建授权，也不需要 allowBuilds。
 

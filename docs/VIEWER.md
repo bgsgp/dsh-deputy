@@ -89,7 +89,11 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 ```
 
 `level` 的优先级是 `error > running > idle`：任一组件最近出过错就是红，任一组件在跑就是绿，
-都没开是灰。`client.js` 每 2 秒拉一次（没人订阅就停），把它渲染成侧栏那一行右侧的小圆点。
+都没开是灰。`client.js` 每 2 秒拉一次（没人订阅就停），把它渲染成侧栏那一行**图标右边**的小圆点。
+
+注意点位：侧栏行的右端 0..28px 属于 unpin（大头针）按钮（`.panelUnpin{position:absolute;right:0}`，
+悬停才显形），所以状态点**不做绝对定位**，而是内联进 `.ddp-glyph`（图标 + 4px gap + 点），
+随图标走；缩成窄栏（36px 图标座）时也依然是图标右侧的一点。
 
 `dsh-deputy/os` 与 `dsh-deputy/browser` 是两个 Cordis 条目、互不 inject，
 所以状态放在**模块级总线**而不是 ctx 服务里——同进程、同一份模块实例，两边都写得到。
