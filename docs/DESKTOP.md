@@ -45,6 +45,7 @@ JS 侧的默认值来自 `config.desktop.mode`（**默认 `user`**），经 `cre
 | 点击 | `WindowFromPoint` → `SetForegroundWindow` → `SetCursorPos` → `SendInput`（`MOUSEEVENTF_*`） | `PostMessage` `WM_MOUSEMOVE/LBUTTONDOWN/UP` |
 | 打字 | `SendInput` + `KEYEVENTF_UNICODE`（逐字符 down/up，IME 与自绘窗口都认） | `PostMessage` `WM_CHAR` |
 | 快捷键 | `SendInput` `VK` down/up（`GetKeyState` 型快捷键也认） | `PostMessage` `WM_KEYDOWN/UP`（部分浏览器不认） |
+| 启动程序 | `CreateProcessW`；随后 `RaiseProcessWindow` 用 `SetWindowPos`(TOPMOST→NOTOPMOST, NOACTIVATE) 抬到 z-order 顶部（前台锁下 `SetForegroundWindow` 无效），单实例程序按 exe 名找已有窗口 | `CreateProcessW` 到目标桌面，`PrintWindow` 抓它 |
 | 关会话 | 只退出宿主，**不** `CloseDesktop`、**不**杀 `$launched` 里的进程 | 退出即销毁桌面与里面所有窗口 |
 | 抢不抢用户 | 抢（点击会把目标窗口提到前台） | 不抢 |
 

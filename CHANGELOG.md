@@ -2,6 +2,28 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.43
+
+### 面板改成彩色整屏，启动程序抬到最前
+- **面板不再只有灰度**：`/api/frame` 优先走宿主新增的 `snapshot` op —— 宿主侧 `BitBlt/PrintWindow` 后直接编码成
+  **彩色 PNG** 返回（`SnapshotScreen` / `SnapshotWindow` + `ToPngBase64`/`EncodePng`）。老宿主或测试假宿主没有
+  `snapshot` 就自动退回原来的灰度帧，行为不变。
+- **体积**：1080p 彩色 PNG 一帧约 0.4–0.6 MB；`maxWidth: 1600` 让宿主先等比缩小再编码（面板显示宽度本来就只有
+  1000 出头），把帧压到一半以下。实测 1600×900 一帧约 230 ms、400–500 KB。
+- **点击坐标**：帧被缩小后，`/api/frame` 额外回 `frameWidth/frameHeight`（**缩放前**像素），
+  `viewer.mjs` 的点击换算改用它们（之前用显示宽高，缩放后会整体点偏）；窗口帧仍叠加 `originX/originY`。
+  假宿主补了 `state.inputLog`，自检里断言「发到宿主的坐标已经加上窗口原点」。
+- **启动后抬到最前**：user 模式 `launch` 之后调 `RaiseProcessWindow(pid, 2500)` —— Windows 前台锁不允许后台进程
+  `SetForegroundWindow`（实测 `AttachThreadInput` 绕法也被拒），但允许用
+  `SetWindowPos(HWND_TOPMOST→HWND_NOTOPMOST, SWP_NOACTIVATE)` 把窗口抬到 z-order 顶部：
+  截图里它就是最前的，点它时鼠标消息会落到它身上，**点击本身完成激活**。单实例程序（Win11 记事本）会把窗口交给
+  已有进程，启动的 pid 随即退出，所以还有一层「按 exe 名找已有窗口再抬」的兜底，回执多一个 `focused`。
+- **风险如实说明**：user 模式是在用户自己的桌面上注入输入。启动的程序若抬不到最前，点击会落到当时该坐标下的窗口
+  （真机测试时就曾把测试文字打进用户正在编辑的 Excel 公式栏）。所有动作前后都能用 `deputy_sense`/面板截图核对；
+  不确定时先用 `isolated` 模式。
+- **自检**：`node test/run-tests.mjs` = **52 项全部通过**（新增「彩色快照优先，点击按缩放前像素换算」）；
+  `check-plugin.mjs` 新增彩色快照与 `frameWidth` 断言（并禁止回退到绝对定位的旧状态点）。
+
 ## 1.3.42
 
 ### 默认改在「真实桌面」上操作（对齐豆包式电脑操作）

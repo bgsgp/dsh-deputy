@@ -3,7 +3,8 @@
 // 路由（全部 JSON，全部 cache-control: no-store）：
 //   GET  /api/health          → { ok, platform, state, name, pid }
 //   GET  /api/status          → os + browser 两个组件的合成状态（侧栏状态点读这个）
-//   GET  /api/frame           → { ok, png(base64 灰度 PNG), width, height, ts }
+//   GET  /api/frame           → { ok, png(彩色 PNG base64), width, height, color, ts }
+//                               （宿主不支持彩色快照时退回灰度帧，color:false）
 //                               失败时 ok:false + reason + code（NOWINDOW = 桌面里还没有窗口）
 //   POST /api/open            → 开桌面（Windows 上会弹 UAC）
 //   POST /api/close           → 收桌面
@@ -114,6 +115,28 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
     // 轮询、手动刷新、点击后补帧可能同时到来；合并成一次 BitBlt，避免把宿主打满。
     if (frameInFlight) return frameInFlight
     frameInFlight = (async () => {
+      // 面板要「用户看到的画面」：优先彩色快照（宿主侧直接编码 PNG）。
+      // 老宿主/测试假宿主没有 snapshot 就退回灰度帧，行为不变。
+      if (typeof session.snapshot === 'function') {
+        try {
+          // 面板宽度一般 1000px 出头，缩到 1600 再编码能把 PNG 体积砍一半以上。
+          const s = await session.snapshot({ target: session.mode === 'isolated' ? 'window' : 'screen', maxWidth: 1600 })
+          return {
+            png: s.png,
+            width: s.width,
+            height: s.height,
+            frameWidth: s.frameWidth ?? s.width,
+            frameHeight: s.frameHeight ?? s.height,
+            originX: s.originX ?? 0,
+            originY: s.originY ?? 0,
+            color: true,
+            ts: Date.now(),
+          }
+        } catch (e) {
+          if (e.code === 'NOWINDOW') throw e
+          /* 其它失败退回灰度帧 */
+        }
+      }
       const f = await session.capture()
       if (!Number.isInteger(f.width) || !Number.isInteger(f.height) || f.width <= 0 || f.height <= 0) {
         throw new Error('宿主返回了非法帧尺寸')
@@ -122,8 +145,11 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
         png: encodeGrayPng(f.gray, f.width, f.height).toString('base64'),
         width: f.width,
         height: f.height,
+        frameWidth: f.width,
+        frameHeight: f.height,
         originX: f.originX ?? 0,
         originY: f.originY ?? 0,
+        color: false,
         ts: Date.now(),
       }
     })()
@@ -244,8 +270,9 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
       try {
         const b = await bodyOf(req)
         const kind = b.type ?? b.op // 旧客户端曾使用 op，两种都接受
-        const width = lastFrame?.width ?? session.captureWidth ?? 0
-        const height = lastFrame?.height ?? session.captureHeight ?? 0
+        // 帧可能被宿主等比缩小过，点击必须换算到原始像素；缩放只影响显示，不影响坐标。
+        const width = lastFrame?.frameWidth ?? lastFrame?.width ?? session.captureWidth ?? 0
+        const height = lastFrame?.frameHeight ?? lastFrame?.height ?? session.captureHeight ?? 0
         let input
         if (kind === 'click') {
           const x = Number(b.x)

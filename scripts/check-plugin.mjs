@@ -392,7 +392,7 @@ if (exists(ps1Path)) {
     ? ok('windows-desktop.ps1 带 UTF-8 BOM（无 BOM 会被 CP936 解码吞换行）')
     : bad('windows-desktop.ps1 缺 UTF-8 BOM —— Windows PowerShell 会按 CP936 解码并报语法错误')
   const ps1 = raw.toString('utf8')
-  for (const needle of ['ValidateSet(\'isolated\', \'user\')', '$isUser', 'ClickUser', 'TypeUser', 'KeyUser', 'LaunchUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware']) {
+  for (const needle of ['ValidateSet(\'isolated\', \'user\')', '$isUser', 'ClickUser', 'TypeUser', 'KeyUser', 'LaunchUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware', 'RaiseProcessWindow', 'SetWindowPos']) {
     ps1.includes(needle) ? ok('宿主真实桌面分支用到 ' + needle) : bad('宿主缺少 ' + needle + '（user 模式点不动/打不了字/截图错位）')
   }
   for (const needle of ['PostMessage', 'WindowFromPoint', 'ScreenToClient', 'WM_CHAR', 'GetGUIThreadInfo']) {
@@ -404,6 +404,20 @@ if (exists(ps1Path)) {
   ps1.includes('-not $isUser')
     ? ok('user 模式不关闭用户桌面、不杀用户进程')
     : bad('user 模式缺少 $isUser 保护（可能 CloseDesktop 或杀掉用户进程）')
+  // 8h. 彩色快照（面板要的是用户看到的画面，灰度帧只能给感知链路）
+  for (const needle of ["'snapshot'", 'EncodePng', 'ToPngBase64', 'SnapshotScreen', 'SnapshotWindow', '$maxW']) {
+    ps1.includes(needle) ? ok('宿主彩色快照用到 ' + needle) : bad('宿主缺少 ' + needle + '（面板只能拿到灰度帧）')
+  }
+  const viewerSrc = exists('src/viewer.mjs') ? readFileSync(path.join(ROOT, 'src/viewer.mjs'), 'utf8') : ''
+  viewerSrc.includes('session.snapshot(')
+    ? ok('viewer 优先走宿主彩色快照')
+    : bad('viewer 未调用 session.snapshot（面板仍是灰度）')
+  viewerSrc.includes('lastFrame?.frameWidth')
+    ? ok('viewer 点击按缩放前像素换算（frameWidth）')
+    : bad('viewer 点击未用 frameWidth，缩放后点击会整体偏移')
+  viewerSrc.includes('maxWidth: 1600')
+    ? ok('viewer 请求帧时做了 1600 宽缩放（控制 PNG 体积）')
+    : warn('viewer 未限制帧宽度，1080p 彩色帧偏大')
 } else {
   bad('缺少 ' + ps1Path)
 }

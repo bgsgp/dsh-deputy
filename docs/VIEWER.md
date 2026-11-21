@@ -82,10 +82,11 @@ ctx.slots.inject('main', () =>
 ```
 client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.state
            ──GET /api/status ──► status.mjs 的合成快照（os + browser 两段 + level）
-           ──GET /api/frame  ──► capture() → 灰度 → encodeGrayPng → base64
+           ──GET /api/frame  ──► snapshot() → 彩色 PNG（宿主编码，>1600 宽先缩放）
+                                 └ 老宿主没有 snapshot 时退回 capture() → 灰度 → encodeGrayPng
            ──POST /api/input ──► 归一化坐标 → 像素 → 宿主（user: SendInput／isolated: PostMessage）
            ──POST /api/open  ──► user: 直接握当前桌面；isolated: CreateDesktopW（弹 UAC）
-           ──POST /api/launch ► 宿主 CreateProcessW（支持 app 预设：edge / notepad）
+           ──POST /api/launch ► 宿主 CreateProcessW（支持 app 预设：edge / notepad；user 模式随后把新窗口抬到 z-order 顶部）
            ──POST /api/close ──► 宿主退出（isolated 才销毁桌面，user 不碰你的窗口）
 ```
 
@@ -95,7 +96,8 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 切到别的页就不再拉帧（组件卸载时清定时器），不会在后台空转。
 
 点击是**归一化坐标**（0..1）：页面被缩放、窗口宽窄变化，命中点不变。宿主协议要像素，
-换算在 `viewer.mjs` 里做（见 `POST /api/input`）。捕获的是窗口局部帧时，宿主还会回传窗口
+换算在 `viewer.mjs` 里做（见 `POST /api/input`）。帧在宿主侧被缩到 1600 宽时，
+`/api/frame` 还会回 `frameWidth/frameHeight`（原始像素），点击按它换算，不能用缩小后的宽高。捕获的是窗口局部帧时，宿主还会回传窗口
 `originX/originY`，由 `DesktopSession.input()` 平移为桌面绝对坐标，避免窗口不在原点时整体点偏。
 
 1.3.40 起，监视窗不再只依赖 flex 里的 `max-width/max-height`：`ResizeObserver` 读取中央可视区域的

@@ -131,6 +131,83 @@ public class Desk2 {
         return gray;
     }
 
+    // 面板要的是"用户看到的画面"：彩色 PNG 直接由宿主编码（灰度帧留给出 diff 的感知链路）。
+    private static string ToPngBase64(System.Drawing.Bitmap b) {
+        using (var ms = new System.IO.MemoryStream()) {
+            b.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+            return Convert.ToBase64String(ms.ToArray());
+        }
+    }
+
+    private static string EncodePng(System.Drawing.Bitmap b, int maxW) {
+        System.Drawing.Bitmap scaled = null;
+        try {
+            System.Drawing.Bitmap enc = b;
+            if (maxW > 0 && b.Width > maxW) {
+                int nh = (int)Math.Round(b.Height * (double)maxW / b.Width);
+                if (nh < 1) nh = 1;
+                scaled = new System.Drawing.Bitmap(b, maxW, nh);
+                enc = scaled;
+            }
+            CapWidth = enc.Width; CapHeight = enc.Height;
+            return ToPngBase64(enc);
+        } finally {
+            if (scaled != null) scaled.Dispose();
+        }
+    }
+
+    public static string SnapshotScreen(IntPtr desk, int w, int h, int maxW) {
+        string png = null;
+        OnDesktop(desk, delegate() {
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            IntPtr memDc = CreateCompatibleDC(screenDc);
+            IntPtr bmp = CreateCompatibleBitmap(screenDc, w, h);
+            IntPtr old = SelectObject(memDc, bmp);
+            try {
+                BitBlt(memDc, 0, 0, w, h, screenDc, 0, 0, SRCCOPY);
+                using (var img = System.Drawing.Image.FromHbitmap(bmp)) {
+                    using (var b = new System.Drawing.Bitmap(img)) { png = EncodePng(b, maxW); }
+                }
+            } finally {
+                SelectObject(memDc, old);
+                DeleteObject(bmp);
+                DeleteDC(memDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+            }
+            CapX = 0; CapY = 0;
+        });
+        return png;
+    }
+
+    public static string SnapshotWindow(IntPtr desk, int wantPid, int excludePid, int maxW) {
+        string png = null;
+        OnDesktop(desk, delegate() {
+            IntPtr target = PickWindow(wantPid, excludePid);
+            if (target == IntPtr.Zero && wantPid != 0) target = PickWindow(0, excludePid);
+            if (target == IntPtr.Zero) throw new InvalidOperationException("隔离桌面里没有可捕获的窗口");
+            RECT wr; GetWindowRect(target, out wr);
+            int w = wr.Right - wr.Left, h = wr.Bottom - wr.Top;
+            if (w <= 0 || h <= 0) throw new InvalidOperationException("窗口尺寸非法");
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            IntPtr memDc = CreateCompatibleDC(screenDc);
+            IntPtr bmp = CreateCompatibleBitmap(screenDc, w, h);
+            IntPtr old = SelectObject(memDc, bmp);
+            try {
+                PrintWindow(target, memDc, 2);
+                using (var img = System.Drawing.Image.FromHbitmap(bmp)) {
+                    using (var b = new System.Drawing.Bitmap(img)) { png = EncodePng(b, maxW); }
+                }
+            } finally {
+                SelectObject(memDc, old);
+                DeleteObject(bmp);
+                DeleteDC(memDc);
+                ReleaseDC(IntPtr.Zero, screenDc);
+            }
+            CapX = wr.Left; CapY = wr.Top;
+        });
+        return png;
+    }
+
     public static string[] Tree(IntPtr desk) {
         string[] rows = null;
         OnDesktop(desk, delegate() {
@@ -319,6 +396,48 @@ public class Desk2 {
     public static int LaunchUser(string exe, string args) {
         // lpDesktop 传 null = 继承调用方所在桌面（用户桌面）。
         return Launch(exe, args, null);
+    }
+
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int cmd);
+    [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hwnd, bool altTab);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint attach, uint attachTo, bool doAttach);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hwnd, StringBuilder s, int n);
+
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+    // 刚启动的程序常常被压在别的窗口后面。Windows 的前台锁不允许后台进程抢焦点，
+    // 但允许把窗口抬到 z-order 顶部（不激活）：从截图里看到它在前，点它时鼠标消息
+    // 会落到它身上，点击本身就把焦点交给它了。
+    public static bool RaiseProcessWindow(int pid, int timeoutMs) {
+        IntPtr found = IntPtr.Zero;
+        int waited = 0;
+        while (waited < timeoutMs) {
+            IntPtr hit = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr h, IntPtr l) {
+                uint wp; GetWindowThreadProcessId(h, out wp);
+                if ((int)wp == pid && IsWindowVisible(h) && !IsIconic(h)) {
+                    var sb = new StringBuilder(256);
+                    GetWindowTextW(h, sb, 256);
+                    if (sb.Length > 0) { hit = h; return false; }
+                }
+                return true;
+            }, IntPtr.Zero);
+            if (hit != IntPtr.Zero) { found = hit; break; }
+            Thread.Sleep(120);
+            waited += 120;
+        }
+        if (found == IntPtr.Zero) return false;
+        ShowWindow(found, 9); // SW_RESTORE
+        // HWND_TOPMOST(-1) 后立刻 HWND_NOTOPMOST(-2)：只抬 z-order，不激活、不置顶
+        const uint noMove = 0x0002, noSize = 0x0001, noActivate = 0x0010;
+        SetWindowPos(found, new IntPtr(-1), 0, 0, 0, 0, noMove | noSize | noActivate);
+        SetWindowPos(found, new IntPtr(-2), 0, 0, 0, 0, noMove | noSize | noActivate);
+        BringWindowToTop(found);
+        Thread.Sleep(180);
+        return true;
     }
 
     public static void ClickOn(IntPtr desk, int x, int y, bool right, int clicks) { OnDesktop(desk, delegate() { Click(x, y, right, clicks); }); }
@@ -574,12 +693,26 @@ try {
                 'launch' {
                     if ($isUser) {
                         $pidOn = [Deputy.Desk2]::LaunchUser($req.exe, [string]$req.args)
+                        # 新窗口可能起在已有窗口后面：抢到前台，后续点击/打字才不会落到别人的窗口上。
+                        $focused = [Deputy.Desk2]::RaiseProcessWindow($pidOn, 2500)
+                        if (-not $focused) {
+                            # 单实例程序（Win11 记事本等）会把窗口交给已有进程，启动的 pid 随即退出。
+                            $exeName = [System.IO.Path]::GetFileNameWithoutExtension([string]$req.exe)
+                            foreach ($proc in @(Get-Process -Name $exeName -ErrorAction SilentlyContinue)) {
+                                if ($proc.MainWindowHandle -ne 0) {
+                                    $focused = [Deputy.Desk2]::RaiseProcessWindow($proc.Id, 1500)
+                                    if ($focused) { break }
+                                }
+                            }
+                        }
                     } else {
                         $pidOn = [Deputy.Desk2]::Launch($req.exe, [string]$req.args, $Name)
                     }
                     # 用户桌面模式不登记 pid：finally 里绝不许杀掉用户自己的进程。
                     if (-not $isUser) { $launched += $pidOn }
-                    Reply @{ id = $req.id; ok = $true; pid = $pidOn; mode = $Mode }
+                    $resp = @{ id = $req.id; ok = $true; pid = $pidOn; mode = $Mode }
+                    if ($isUser) { $resp.focused = $focused }
+                    Reply $resp
                 }
                 'capture' {
                     if ($isUser) {
@@ -603,6 +736,33 @@ try {
                         # 没有窗口就明确说没有：绝不回退到必然全黑的桌面 BitBlt（那正是侧栏页一片黑的成因）。
                         Reply @{ id = $req.id; ok = $false; code = 'NOWINDOW'; error = '隔离桌面里还没有可捕获的窗口，先启动一个程序'; state = $Name }
                     }
+                }
+                'snapshot' {
+                    # 彩色整屏/整窗 PNG（宿主侧编码）。灰度 'capture' 仍给感知链路用。
+                    # maxWidth 让宿主先等比缩小再编码（面板用不着 1:1，PNG 体积能砍一半以上）；
+                    # frameWidth/frameHeight 回原始像素尺寸，点击坐标仍按真实屏幕换算。
+                    $maxW = 0
+                    if ($req.maxWidth) { $maxW = [int]$req.maxWidth }
+                    if ($req.target -eq 'window' -and -not $isUser) {
+                        $targetPid = 0
+                        if ($launched.Count -gt 0) { $targetPid = [int]$launched[$launched.Count - 1] }
+                        try {
+                            $png = [Deputy.Desk2]::SnapshotWindow($handle, $targetPid, $PID, $maxW)
+                            $w = [Deputy.Desk2]::CapWidth
+                            $h = [Deputy.Desk2]::CapHeight
+                            Reply @{ id = $req.id; ok = $true; width = $w; height = $h; frameWidth = $w; frameHeight = $h; originX = [Deputy.Desk2]::CapX; originY = [Deputy.Desk2]::CapY; source = 'window'; pngBase64 = $png }
+                        } catch {
+                            Reply @{ id = $req.id; ok = $false; code = 'NOWINDOW'; error = '隔离桌面里还没有可捕获的窗口，先启动一个程序'; state = $Name }
+                        }
+                        continue
+                    }
+                    $sw = [Deputy.Desk2]::ScreenWidth()
+                    $sh = [Deputy.Desk2]::ScreenHeight()
+                    if ($sw -le 0 -or $sh -le 0) { throw '取不到屏幕尺寸' }
+                    $png = [Deputy.Desk2]::SnapshotScreen($handle, $sw, $sh, $maxW)
+                    $w = [Deputy.Desk2]::CapWidth
+                    $h = [Deputy.Desk2]::CapHeight
+                    Reply @{ id = $req.id; ok = $true; width = $w; height = $h; frameWidth = $sw; frameHeight = $sh; originX = 0; originY = 0; source = 'screen'; pngBase64 = $png }
                 }
                 'debug' {
                     Reply @{ id = $req.id; ok = $true; info = [Deputy.Desk2]::Debug($handle) }

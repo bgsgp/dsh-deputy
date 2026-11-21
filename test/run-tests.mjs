@@ -769,7 +769,7 @@ await test('宿主脚本：user 模式走 SendInput、isolated 走 PostMessage�
   assert.equal(raw[2], 0xbf)
   const ps1 = raw.toString('utf8')
   // user 模式：真实桌面是输入桌面，SendInput 才有效（隔离桌面实测 0/N）
-  for (const needle of ['ValidateSet(\'isolated\', \'user\')', '$isUser', 'ClickUser', 'TypeUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware']) {
+  for (const needle of ['ValidateSet(\'isolated\', \'user\')', '$isUser', 'ClickUser', 'TypeUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware', 'RaiseProcessWindow', 'SetWindowPos', 'SWP_NOACTIVATE'.replace('SWP_NOACTIVATE', 'noActivate')]) {
     assert.ok(ps1.includes(needle), '宿主脚本缺少 ' + needle)
   }
   // isolated 模式：非输入桌面，只能 PostMessage 投递
@@ -831,6 +831,57 @@ await test('HTTP 面板：健康检查、合并采帧、坐标换算与输入校
     assert.equal(badLaunch.status, 400)
     const wrongMethod = await post('/api/health')
     assert.equal(wrongMethod.status, 405)
+  } finally {
+    await viewer.stop()
+    await session.close()
+  }
+})
+
+await test('HTTP 面板：彩色快照优先，点击按缩放前像素换算', async () => {
+  const transport = createFakeTransport()
+  const request = transport.request
+  transport.request = async (payload) => {
+    if (payload.op === 'snapshot') {
+      return {
+        ok: true,
+        pngBase64: 'iVBORw0KGgo=',
+        width: 16,
+        height: 9,
+        frameWidth: 32,
+        frameHeight: 18,
+        originX: 5,
+        originY: 7,
+        source: 'window',
+      }
+    }
+    return request(payload)
+  }
+  const session = new DesktopSession({ transport, name: 'deputy-color-test', mode: 'user' })
+  const viewer = createViewer({ session, port: 0 })
+  const base = await viewer.start()
+  const call = async (path, init) => {
+    const res = await fetch(new URL(path, base), init)
+    return { status: res.status, body: await res.json() }
+  }
+  const post = (path, body) =>
+    call(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  try {
+    await post('/api/open', undefined)
+    const frame = await call('/api/frame')
+    assert.equal(frame.body.ok, true)
+    assert.equal(frame.body.color, true, '有宿主彩色快照时不应退回灰度')
+    assert.equal(frame.body.width, 16)
+    assert.equal(frame.body.height, 9)
+    // 归一化坐标必须按 frameWidth/frameHeight（缩放前 32x18）换算，再加窗口原点
+    const click = await post('/api/input', { type: 'click', x: 0.5, y: 0.5 })
+    assert.equal(click.body.ok, true)
+    // 响应里是「帧坐标」（缩放前 32x18 的一半），窗口原点由 DesktopSession 在发给宿主前加
+    assert.equal(click.body.input.x, 16)
+    assert.equal(click.body.input.y, 9)
+    // 到了宿主这一层必须已加上窗口原点（5,7）
+    const last = transport.state.inputLog.at(-1)
+    assert.equal(last.x, 21)
+    assert.equal(last.y, 16)
   } finally {
     await viewer.stop()
     await session.close()

@@ -92,7 +92,7 @@ close()                ──► 宿主: isolated 退出即销毁桌面；user �
 ```
 DESKTOP  user：真实桌面（整屏 + SendInput）／isolated：独立 Desktop + 受限令牌
    │
-SENSOR   目标桌面内采帧（灰度，整屏或逐窗口）
+SENSOR   目标桌面内采帧（面板用彩色 PNG：user 整屏／isolated 逐窗口；感知链路仍用灰度）
    │
 SENSE    dHash 距离 + 8×8 网格变化 → 0..1 分数 → 四档
    │      跨档帧进缓冲，满 16 帧 → 4×4 拼图（标签烧进图里）
@@ -111,7 +111,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 51 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
+node test/run-tests.mjs        # 52 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -156,7 +156,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 左侧「应用」栏（新建 / 搜索 / 自定义 / QQ机器人 / 定时任务 / …）底部会多一行
 **「DSH操作电脑」**。点它，中央面板切到整页的桌面画面：
 
-- 每 0.7 秒拉一帧灰度画面，按宿主真实帧尺寸与窗口可用区域等比完整显示；点画面 = 在目标桌面里点一下（缩放与居中留白均正确换算，原生拖图已禁用）；
+- 每 0.7 秒拉一帧**彩色画面**（宿主直接编码 PNG；超过 1600 宽先等比缩小，省一半以上体积），按宿主真实帧尺寸与窗口可用区域等比完整显示；点画面 = 在目标桌面里点一下（缩放、居中留白与 1600 宽缩放均已换算，原生拖图已禁用）；
 - 「打开桌面」起会话（`isolated` 模式要建桌面所以弹 UAC，`user` 模式不弹）、「收起桌面」回收；
 - `isolated` 桌面里还没窗口时（`NOWINDOW`）不再给一张全黑图，而是提示 + 「启动 Edge / 启动记事本」按钮（`user` 模式永远有整屏画面，不会 `NOWINDOW`）；
 - 这页不是浮窗，也不占会话；切回对话在侧栏点一下即可。

@@ -145,7 +145,7 @@ export function createHostTransport({ script = path.join(SCRIPTS, 'windows-deskt
 
 /** 内存假宿主：非 Windows 也能测状态机与 HTTP 数据面。 */
 export function createFakeTransport() {
-  const state = { desktop: null, pid: null, frames: 0, inputs: 0, closed: false, starts: 0 }
+  const state = { desktop: null, pid: null, frames: 0, inputs: 0, inputLog: [], closed: false, starts: 0 }
   return {
     state,
     start: async (name) => {
@@ -171,6 +171,7 @@ export function createFakeTransport() {
           return { ok: true, tree: { name: 'deputy-desktop', type: 'Pane', children: [] } }
         case 'input':
           state.inputs++
+          state.inputLog.push(payload.input)
           return { ok: true }
         default:
           return { ok: true }
@@ -246,6 +247,27 @@ export class DesktopSession {
     this.pid = r.pid ?? this.pid
     this.state = 'running'
     return r
+  }
+
+  // 面板用的彩色帧：宿主直接编码 PNG，省掉 Node 侧的灰度转换与带宽膨胀。
+  async snapshot({ target = 'screen', maxWidth = 0 } = {}) {
+    this.assertActive('snapshot')
+    const r = await this.transport.request({ op: 'snapshot', desktop: this.name, target, maxWidth })
+    const width = r.width ?? this.captureWidth
+    const height = r.height ?? this.captureHeight
+    const originX = r.originX ?? 0
+    const originY = r.originY ?? 0
+    if (typeof r.pngBase64 !== 'string' || !r.pngBase64) {
+      throw new DesktopError('宿主返回了非法快照', 'EFRAME')
+    }
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+      throw new DesktopError('宿主返回了非法帧尺寸', 'EFRAME')
+    }
+    this.frameOrigin = { x: originX, y: originY }
+    // frameWidth/Height = 原始像素（缩放前）；点击换算必须用它，不能用缩小后的 width。
+    const frameWidth = Number.isInteger(r.frameWidth) ? r.frameWidth : width
+    const frameHeight = Number.isInteger(r.frameHeight) ? r.frameHeight : height
+    return { png: r.pngBase64, width, height, frameWidth, frameHeight, originX, originY, source: r.source ?? 'screen' }
   }
 
   async capture(region) {
