@@ -14,9 +14,11 @@
  *    侧栏自己渲染行、管选中和 More 菜单，插件只提供 id/顺序/文字/图标。
  *  - main：keyed 槽，注册项 = { name, key } + 页面组件；key 必须等于侧栏 id。
  *    点侧栏行 → ctx.layout.selectPanel(id) → 中央区切到这一页（本插件不直接调 layout）。
- *  - 行右端 0..28px 是侧栏自己的 unpin（大头针）按钮（.panelUnpin，position:absolute;right:0，
- *    仅 hover/focus 时 opacity:1）。行内没有「尾部插槽」，所以状态点**不贴行右端**，
- *    而是内联在图标右侧（.ddp-glyph 里的 .ddp-dot），随 glyph 走，永远不会和大头针重叠。
+ *  - 行结构（侧栏自己渲染）：panelEntry > panelRow > [panelGlyph(图标), panelTitle(文字)]，
+ *    行右端 0..28px 是侧栏自己的 unpin（大头针，position:absolute;right:0，仅 hover 显形）。
+ *  - 状态点要「跟在文字右边」又「不碰大头针」：插件没有尾部插槽，也不去改侧栏的 React DOM，
+ *    而是在 panelTitle 上用 ::after 画一个 6px 圆点（行内，紧跟省略号文字），
+ *    颜色由同行 .ddp-glyph[data-level] 通过 :has() 决定。窄栏收起时标题隐藏，圆点随之隐藏。
  * 数据面走宿主起的 127.0.0.1:17872，见 src/viewer.mjs。
  */
 window.__ModuleLoader__.load({
@@ -59,13 +61,15 @@ window.__ModuleLoader__.load({
 .ddp-empty .ddp-actions{display:flex;gap:8px;justify-content:center;margin-top:14px;flex-wrap:wrap}
 .ddp-foot{flex:none;display:flex;align-items:center;gap:10px;padding:7px 14px;
   border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;opacity:.85}
-/* 侧栏状态点：内联在图标右边（不贴行右端 —— 行右端 0..28px 是大头针的地盘） */
-.ddp-glyph{display:inline-flex;align-items:center;gap:4px;line-height:0}
-.ddp-dot{flex:none;width:6px;height:6px;border-radius:50%;pointer-events:none;
-  transition:background-color .2s ease}
-.ddp-dot[data-level="running"]{background:#22c55e}
-.ddp-dot[data-level="error"]{background:#ef4444}
-.ddp-dot[data-level="idle"]{background:#9ca3af}
+/* 侧栏状态点：画在行文字（panelTitle）后面，行内元素，不贴行右端、不碰大头针。
+   侧栏类名是 CSS Modules 哈希（wtg9ga_panelTitle），这里按 *_panelTitle 后缀匹配；
+   :has() 用我们自己的 .ddp-glyph[data-level] 限定，不会误伤别的行。 */
+.ddp-glyph{display:inline-flex;align-items:center;line-height:0;cursor:default}
+[class*="_panelEntry"]:has(> [class*="_panelRow"] .ddp-glyph) [class*="_panelTitle"]::after{
+  content:'';display:inline-block;width:6px;height:6px;border-radius:50%;margin-left:6px;
+  vertical-align:1px;background:#9ca3af;transition:background-color .2s ease}
+[class*="_panelEntry"]:has(.ddp-glyph[data-level="running"]) [class*="_panelTitle"]::after{background:#22c55e}
+[class*="_panelEntry"]:has(.ddp-glyph[data-level="error"]) [class*="_panelTitle"]::after{background:#ef4444}
 `
 
     const CSS_ID = 'dsh-deputy/viewer.css'
@@ -181,7 +185,13 @@ window.__ModuleLoader__.load({
       )
       return h(
         'span',
-        { className: 'ddp-glyph' },
+        {
+          className: 'ddp-glyph',
+          'data-level': level,
+          title: tip,
+          'aria-label': tip,
+          role: 'img',
+        },
         h(
           'svg',
           {
@@ -196,7 +206,6 @@ window.__ModuleLoader__.load({
           h('path', { d: 'M8 20.2h8', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
           h('path', { d: 'M12.6 9.4l5.2 2.1-2.2 1.1-1.1 2.2-1.9-5.4z', fill: 'currentColor' }),
         ),
-        h('i', { className: 'ddp-dot', 'data-level': level, title: tip, 'aria-label': tip, role: 'img' }),
       )
     }
 

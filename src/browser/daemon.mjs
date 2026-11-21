@@ -22,6 +22,7 @@ export class BrowserDaemon {
       userDataDir: options.userDataDir ?? null,
       statePath: options.statePath ?? null,
       timeoutMs: options.timeoutMs ?? 15000,
+      loginState: options.loginState ?? null, // { sourceRoot, profile } | null：见 cookies.mjs
       launch: options.launch ?? launchBrowser,
     }
     this.browser = null
@@ -35,6 +36,8 @@ export class BrowserDaemon {
     this.lastUrl = null
     this.lastError = null
     this.unsubscribe = null
+    this.login = null // 登录态继承结果（launch 回传的摘要）
+    this.cookieCount = null // 新实例实际能读到的 cookie 数（Storage.getCookies 数出来的）
   }
 
   get state() {
@@ -55,6 +58,14 @@ export class BrowserDaemon {
       refs: this.nodes.size,
       url: this.lastUrl,
       error: this.lastError,
+      cookies: {
+        inherit: Boolean(this.login?.inherit),
+        source: this.login?.source ?? null,
+        profile: this.login?.profile ?? null,
+        bytes: this.login?.bytes ?? 0,
+        reason: this.login?.reason ?? null,
+        count: this.cookieCount,
+      },
     }
   }
 
@@ -64,17 +75,22 @@ export class BrowserDaemon {
     if (this.starting) return this.starting
     this.starting = (async () => {
       try {
-        if (!this.browser) this.browser = await this.options.launch({
-          exe: this.options.exe,
-          userDataDir: this.options.userDataDir,
-          headless: this.options.headless,
-          timeoutMs: this.options.timeoutMs,
-        })
+        if (!this.browser) {
+          this.browser = await this.options.launch({
+            exe: this.options.exe,
+            userDataDir: this.options.userDataDir,
+            headless: this.options.headless,
+            timeoutMs: this.options.timeoutMs,
+            loginState: this.options.loginState,
+          })
+          this.login = this.browser.loginState ?? null
+        }
         if (!this.cdp) {
           this.cdp = await CdpConnection.connect(this.browser.wsUrl, { timeoutMs: this.options.timeoutMs })
           this.unsubscribe = this.cdp.on((msg) => this.#onEvent(msg))
         }
         await this.#attachDefaultPage()
+        await this.#countCookies()
         this.lastError = null
         return this.status()
       } catch (e) {
@@ -86,6 +102,16 @@ export class BrowserDaemon {
       }
     })()
     return this.starting
+  }
+
+  /** 数一下新实例里实际有多少 cookie：这是「登录态真的继承到了」的唯一硬证据。 */
+  async #countCookies() {
+    try {
+      const r = await this.cdp.send('Storage.getCookies', {}, this.pageSession)
+      this.cookieCount = Array.isArray(r?.cookies) ? r.cookies.length : 0
+    } catch {
+      this.cookieCount = null // 数不出来就如实留空，不假装成功
+    }
   }
 
   async #attachDefaultPage() {
@@ -228,6 +254,7 @@ export class BrowserDaemon {
     this.pageSession = null
     this.targetId = null
     this.nodes.clear()
+    this.cookieCount = null
     if (this.browser) {
       try {
         await this.browser.close()

@@ -2,6 +2,37 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.36
+
+### 侧栏状态点跟到行文字右边
+- 之前圆点挂在图标容器里（图标和文字之间），看起来更像「图标角标」；现在改成
+  `[class*="_panelTitle"]::after` 画在**标题文字右边**（6px 圆点、margin-left 6px），
+  颜色由 `:has(.ddp-glyph[data-level=…])` 从同一个 `data-level` 取（绿 #22c55e / 红 #ef4444 / 灰 #9ca3af）。
+- 不改侧栏自己的 React 树、也不绝对定位：圆点随标题的省略号截断一起收缩，窄栏（只显示图标）
+  时标题隐藏、圆点自然不出现，也不会撞悬停才显形的大头针（`.panelUnpin{right:0;width:28px}`）。
+- `check-plugin` 断言改为「必须含 `_panelTitle` + `::after`，且不得再出现 `ddp-dot`」。
+
+### 浏览器组件继承本机登录态（cookies）
+- 新增 `src/browser/cookies.mjs`：启动浏览器**之前**把本机 Edge/Chrome 的
+  `<User Data>/Local State` + `<profile>/Network/Cookies`（含 -journal/-wal/-shm）只读复制进
+  daemon 自己的 `user-data-dir`；自动找源目录与 profile（Default 优先，其次 cookie 库最新），
+  也可用 `cookiesSource` / `cookiesProfile` 指定。复制失败不阻断启动，只标
+  `cookies.reason`（`NO_SOURCE` / `NO_PROFILE` / `COPY_FAILED`…）。
+- 接线：`launch.mjs` 传 `loginState` 并回 `loginState`；`daemon.mjs` 起完后用 CDP
+  `Storage.getCookies` 数实际条数（`status().cookies.count`）；`browser_open` / `browser_status`
+  的返回与 output schema 增加 `cookies`，并给一句中文提示；`browser.mjs` 增加
+  `cookies` / `cookiesProfile` / `cookiesSource` / `persistProfile` 配置，`user-data-dir`
+  默认固定在 `%LOCALAPPDATA%\dsh-deputy\browser-profile`，所以在面板里登录一次能跨启动保留。
+- 真机结论（必须如实知道）：本机 Edge 的 cookie 库 403 行、成功复制 1.26 MB，但新实例里
+  `Storage.getCookies` 读到 **0 条**——Edge/Chrome 127+ 的 App-Bound Encryption 让复制出来的
+  cookie 解不开（试过 `--disable-features=msEdgeAppBoundEncryption` / `AppBoundEncryption` 及
+  两者组合、非 headless，均 0 条）。因此插件**不会**把「复制成功」当成「已登录」，
+  只以 `count` 为准。
+- 风险写在 [docs/BROWSER.md](docs/BROWSER.md) 的「5.1 登录态（cookies）与风险」：等于把登录身份
+  交给自动化（`cookies:false` 可关）、凭据落盘、ABE 静默失效、退出登录不同步、
+  `--remote-debugging-port` 本机任意进程可连。
+- 自检 34 → 35 项（新增登录态复制：正常复制 / `NO_SOURCE` / `NO_PROFILE` / `NO_DEST` 均不抛错）。
+
 ## 1.3.35
 
 ### 侧栏入口消失的真机根因（包根锚点 row）

@@ -103,6 +103,53 @@ display/visibility/opacity/cursor/overflow，includeDOMRects/includePaintOrder�
 （`required` 内联、object 显式 `additionalProperties`）——两套别混，混了真实
 `dsh-tools` 会直接抛 `JsonSchemaError` / `parameters.x.additionalProperties must be explicitly true or false`。
 
+## 5.1 登录态（cookies）与风险
+
+默认 `cookies: 'inherit'`：daemon 启动**之前**，把本机 Edge/Chrome 的登录态复制进它自己的
+`user-data-dir`，这样新实例带着用户已经登录的会话去访问站点。复制逻辑在 `src/browser/cookies.mjs`。
+
+| 文件 | 作用 |
+|---|---|
+| `<User Data>/Local State` | Chromium 的 cookie 加密密钥（DPAPI 包裹） |
+| `<profile>/Network/Cookies`（+ `-journal` / `-wal` / `-shm`） | cookie 库本体 |
+
+- 源目录：默认按要启动的浏览器自动找（`%LOCALAPPDATA%\Microsoft\Edge\User Data` /
+  `%LOCALAPPDATA%\Google\Chrome\User Data`），可用 `cookiesSource` 显式指定；
+  profile 默认 `auto`（Default 优先，其次 cookie 库最新的）。
+- 复制失败（源不存在、profile 没有 cookie 库、文件被占用）**不阻断启动**：浏览器以未登录
+  状态起，状态里标 `cookies.reason`（`NO_SOURCE` / `NO_PROFILE` / `COPY_FAILED`…）。
+- `user-data-dir` 默认固定在 `%LOCALAPPDATA%\dsh-deputy\browser-profile`（`persistProfile: false`
+  可退回一次性临时目录），所以「在面板里登录一次」能跨启动保留。
+
+### 风险（请务必知道）
+
+1. **等于把登录态交给了自动化**：复制进来的 cookie 让 daemon 拥有你本机浏览器的登录身份，
+   模型发起的动作就是「以你本人身份」执行。只在你信任这个插件与当前会话时开启；
+   `cookies: false` 可让 daemon 永远是一个干净的未登录实例。
+2. **凭据会落盘**：cookie 库是整体拷贝，落在本机 `%LOCALAPPDATA%` 下，和主浏览器同等敏感
+   （磁盘被读 = 登录态泄露）。不要把该目录同步/备份到云端。
+3. **App-Bound Encryption 会让继承静默失效**：Chrome 127+ / 较新的 Edge 用应用绑定加密，
+   复制出来的 cookie 库在别的实例里解得开 0 条（本机实测：复制 1.26 MB，
+   `Storage.getCookies` 读到 0 条，页面仍是未登录）。这不是插件坏了，是浏览器的安全边界；
+   此时只能在面板里手动登录一次（profile 会保留），或用企业策略
+   `ApplicationBoundEncryptionEnabled=0` 关闭 ABE（会降低本机安全性，不自动做）。
+4. **有效期与退出不同步**：站点退出登录后，已复制的旧 cookie 仍可能在 daemon 的 profile 里
+   存活到过期；反过来主浏览器新登录也要等下次 daemon 启动才复制。
+5. **调试端点**：`--remote-debugging-port` 只绑 `127.0.0.1`，但本机任意进程都能连；
+   用完 `browser_close`。
+
+### 怎么确认到底继没继承
+
+`browser_open` / `browser_status` 的返回里有 `cookies`：
+
+```json
+{ "inherit": true, "source": "C:\\Users\\…\\Edge\\User Data", "profile": "Default",
+  "bytes": 1262465, "count": 0, "reason": null }
+```
+
+`count` 是新实例里 `Storage.getCookies` 实际数到的条数，**唯一硬证据**。
+`inherit: true` 且 `count: 0` 就说明撞上第 3 条的 ABE，不要报告成「已登录」。
+
 ## 6. 失败分类（返回「下一步」，不是报错文本）
 
 `src/browser/errors.mjs`，每个码都带 `hint`：
@@ -146,7 +193,7 @@ display/visibility/opacity/cursor/overflow，includeDOMRects/includePaintOrder�
 ## 8. 自己怎么验
 
 ```bash
-node test/run-tests.mjs        # 34 项，含浏览器工具的 schema / 失败信封 / ref 代数回归
+node test/run-tests.mjs        # 35 项，含浏览器工具的 schema / 失败信封 / ref 代数 / 登录态复制回归
 node scripts/check-plugin.mjs  # 含「两个组件」「browser 5 工具」「状态总线」三段
 ```
 
@@ -164,5 +211,5 @@ console.log(await d.act({ steps: [{ verb: 'click', ref: ref.ref }] }))
 await d.close()
 ```
 
-注意：`browser_open` 用的是**独立** `user-data-dir`，不会碰你主浏览器的登录态；
-每次工具调用都从新快照开始，旧 ref 一律作废。
+注意：`browser_open` 用的是**独立** `user-data-dir`，不会写坏主浏览器的 profile；
+cookie 是只读复制（风险见 5.1）。每次工具调用都从新快照开始，旧 ref 一律作废。

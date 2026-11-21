@@ -94,7 +94,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 34 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器 ref 代数 / 状态总线 / HTTP 面板 / 客户端注册
+node test/run-tests.mjs        # 35 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器 ref 代数 / 登录态复制 / 状态总线 / HTTP 面板 / 客户端注册
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -128,10 +128,10 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 
 | 工具 | 作用 | 返回 |
 |---|---|---|
-| `browser_open` | 起独立浏览器（独立 user-data-dir + CDP），可选直接导航 | `{ok, state, url, pid, docEpoch}` |
+| `browser_open` | 起独立浏览器（独立 user-data-dir + CDP + 复制本机登录态），可选直接导航 | `{ok, state, url, pid, docEpoch, cookies}` |
 | `browser_observe` | 把页面压成带 ref 的文本 | `{ok, text, refs, state}` |
 | `browser_act` | 按 ref 顺序执行动作，遇布局变化就停 | `{ok, steps, diff, stopped?, error?}` |
-| `browser_status` | daemon 状态（pid/端口/epoch/最近错误） | `{ok, state, pid, port, url}` |
+| `browser_status` | daemon 状态（pid/端口/epoch/最近错误/cookies） | `{ok, state, pid, port, url, cookies}` |
 | `browser_close` | 关浏览器并清 daemon | `{ok, state}` |
 
 ### 界面：侧栏里的一页
@@ -144,7 +144,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 - 桌面里还没窗口时（`NOWINDOW`）不再给一张全黑图，而是提示 + 「启动 Edge / 启动记事本」按钮；
 - 这页不是浮窗，也不占会话；切回对话在侧栏点一下即可。
 
-图标紧右边还有一个小状态点（不贴行右端，避开悬停出现的大头针），读 `/api/status`（两个组件共用一条状态总线）：
+行文字右边还有一个小状态点（跟着标题走，避开悬停出现的大头针），读 `/api/status`（两个组件共用一条状态总线）：
 **绿 = 有桌面/浏览器在跑，红 = 最近一次操作失败，灰 = 都没开**。
 
 0.2.x 的挂载点是 `sidebar.panellist`（侧栏行）+ `main`（同 key 的整页），细节见 [docs/VIEWER.md](docs/VIEWER.md)。
@@ -170,7 +170,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
 | 侧栏入口（`client.js`） | ✅ 真机验证（0.2.2-rc.5） | 侧栏「应用」一行「DSH操作电脑」+ 中央整页；`sidebar.panellist` / `main` 同 id 注册，`check-plugin` 防回退到 `shell.overlay` |
 | DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），桌面自动化仍待真机回归 |
-| 浏览器组件（`src/browser/`） | 🟡 骨架 + 真机跑通主链 | 起 Edge → 导航 → 快照（686 节点）→ 按 ref 点击 → 回差异；等待三层 / 遮挡处理 / 多标签 / iframe / 凭据脱敏未做，清单见 [docs/BROWSER.md](docs/BROWSER.md) |
+| 浏览器组件（`src/browser/`） | 🟡 骨架 + 真机跑通主链 | 起 Edge → 导航 → 快照（686 节点）→ 按 ref 点击 → 回差异；登录态复制已实现（`cookies.mjs`），但本机 Edge 的 App-Bound Encryption 让新实例读到 0 条 cookie；等待三层 / 遮挡 / 多标签 / iframe / 凭据脱敏未做，清单见 [docs/BROWSER.md](docs/BROWSER.md) |
 
 **已知未验证点**：x64 `INPUT` 40 字节对齐、`SendInput` 在非活动桌面的实际效果、
 UAC/安全桌面对隔离桌面的抢占。已解决：`SetThreadDesktop` 在 PowerShell 里必须放到
@@ -210,7 +210,7 @@ src/
   registry.mjs    toParameters / registerTools（0.2.x 工具注册的公共层）
   os.mjs          组件 dsh-deputy/os：隔离桌面 + 4 个 deputy_* 工具
   browser.mjs     组件 dsh-deputy/browser：浏览器 daemon + 5 个 browser_* 工具
-  browser/        launch / cdp / daemon / snapshot / act / tools / errors
+  browser/        launch / cdp / daemon / snapshot / act / tools / cookies / errors
   index.mjs       兼容入口：只 `export * from './os.mjs'`
   mcp/server.mjs  最小 MCP stdio 服务
 scripts/

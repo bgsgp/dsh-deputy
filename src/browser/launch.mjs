@@ -3,12 +3,14 @@
 // 关键约束（context.md 第 1、8 条）：
 //  - 永远用独立 --user-data-dir：不污染用户日常浏览器，也不被单实例合并到用户已开的窗口里；
 //  - 端口用系统分配的空闲端口（0 也可以，但显式找一个更好排查）；
-//  - 不读 cookie/storage，这里只负责进程与端点。
+//  - 登录态：可选把本机 Edge/Chrome 的 cookie 库复制进临时 profile（见 cookies.mjs / docs/BROWSER.md），
+//    复制发生在 spawn 之前，浏览器启动时就已经带上用户已登录的会话。
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync } from 'node:fs'
 import net from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
+import { copyLoginState, loginStateSummary } from './cookies.mjs'
 import { browserError } from './errors.mjs'
 
 export const BROWSER_CANDIDATES = [
@@ -67,9 +69,11 @@ async function waitForEndpoint(port, timeoutMs) {
  * 起浏览器。返回的 close() 会先尝试 Browser.close，再兜底杀进程。
  * headless 用新 headless（--headless=new），调试与真实渲染都更接近。
  */
-export async function launchBrowser({ exe, args = [], userDataDir, headless = false, timeoutMs = 20000 } = {}) {
+export async function launchBrowser({ exe, args = [], userDataDir, headless = false, timeoutMs = 20000, loginState = null } = {}) {
   const bin = findBrowser(exe)
   const dir = userDataDir ?? mkdtempSync(path.join(os.tmpdir(), 'dsh-deputy-browser-'))
+  // 复制登录态必须在浏览器启动之前：Chromium 只在启动时加载 cookie 库。
+  const login = loginState ? loginStateSummary(copyLoginState({ ...loginState, destDir: dir })) : loginStateSummary(null)
   const port = await freePort()
   const argv = [
     `--remote-debugging-port=${port}`,
@@ -102,6 +106,7 @@ export async function launchBrowser({ exe, args = [], userDataDir, headless = fa
       userDataDir: dir,
       wsUrl: info.webSocketDebuggerUrl,
       browser: info.Browser ?? 'unknown',
+      loginState: login,
       get stderr() {
         return stderr
       },

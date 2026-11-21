@@ -10,7 +10,9 @@
 //   - ref 上的 click / type / key / hover / scroll / navigate / press；
 //   - docEpoch 变化即让旧 ref 失效（STALE_REF），批处理遇变化即停；
 //   - 失败统一 { code, message, hint }。
+import path from 'node:path'
 import { BrowserDaemon } from './browser/daemon.mjs'
+import { findUserDataDir } from './browser/cookies.mjs'
 import { browserToolSpecs } from './browser/tools.mjs'
 import { registerTools } from './registry.mjs'
 import { setBrowserStatus } from './status.mjs'
@@ -24,6 +26,14 @@ export const config = {
   headless: false,
   userDataDir: null,
   statePath: null,
+  // 登录态：默认继承本机 Edge/Chrome 的 cookie（复制进临时 profile）。
+  // 'inherit' | false；风险与实现见 docs/BROWSER.md「登录态与风险」。
+  cookies: 'inherit',
+  cookiesProfile: 'auto', // 'auto' | 'Default' | 'Profile 1' …
+  cookiesSource: null, // 显式指定 User Data 目录；null = 按浏览器自动找
+  // 独立 profile 默认落在本机固定位置，这样「在面板里登录一次」能跨启动保留；
+  // 设 false 则每次启动都用一次性临时目录（更干净，但登录态不保留）。
+  persistProfile: true,
 }
 
 export const state = { daemon: null }
@@ -37,11 +47,30 @@ export function apply(ctx = {}) {
     return { daemon: null }
   }
 
+  // 继承登录态：源只能是用户日常浏览器的 User Data（不是 daemon 自己的 userDataDir）。
+  const loginState =
+    cfg.cookies === false
+      ? null
+      : {
+          sourceRoot: cfg.cookiesSource ?? findUserDataDir({ exe: cfg.exe ?? null }),
+          profile: cfg.cookiesProfile ?? 'auto',
+        }
+  if (cfg.cookies !== false && !loginState.sourceRoot) {
+    log('[dsh-deputy/browser] 没找到本机 Edge/Chrome 的 User Data，浏览器将以未登录状态启动')
+  }
+
+  const profileDir =
+    cfg.userDataDir ??
+    (cfg.persistProfile === false
+      ? null
+      : path.join(process.env.LOCALAPPDATA ?? path.join(process.env.USERPROFILE ?? '', 'AppData/Local'), 'dsh-deputy', 'browser-profile'))
+
   const daemon = new BrowserDaemon({
     exe: cfg.exe ?? null,
     headless: cfg.headless ?? false,
-    userDataDir: cfg.userDataDir ?? null,
+    userDataDir: profileDir,
     statePath: cfg.statePath ?? null,
+    loginState,
   })
   state.daemon = daemon
   setBrowserStatus({ state: 'stopped', running: false, error: null })

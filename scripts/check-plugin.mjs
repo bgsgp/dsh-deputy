@@ -168,8 +168,13 @@ if (clientRel && exists(clientRel)) {
   src.includes("'main'") ? ok('client.js 注册 main 页') : bad('client.js 未注册 main 页')
   src.includes('DSH操作电脑') ? ok('client.js 侧栏名 = DSH操作电脑') : bad('client.js 侧栏名不是 DSH操作电脑')
   src.includes('shell.overlay') ? bad('client.js 仍挂 shell.overlay（应改为侧栏入口）') : ok('client.js 不再挂 shell.overlay')
-  // 状态点必须内联在图标旁：行右端 0..28px 属于 unpin（大头针），绝对定位会重叠。
-  src.includes('ddp-glyph') ? ok('client.js 状态点内联在图标旁（ddp-glyph）') : bad('client.js 缺少 ddp-glyph，状态点位置不明')
+  // 状态点必须画在行文字（panelTitle）右边：行右端 0..28px 属于 unpin（大头针），
+  // 绝对定位会重叠；放在图标旁又不在文字右边（用户明确要求挪到文字后面）。
+  src.includes('ddp-glyph') ? ok('client.js 保留 ddp-glyph 图标标记') : bad('client.js 缺少 ddp-glyph，状态点位置不明')
+  src.includes('_panelTitle') && src.includes('::after')
+    ? ok('client.js 状态点画在行文字右边（panelTitle::after）')
+    : bad('client.js 未把状态点画到行文字右边（缺少 _panelTitle::after）')
+  src.includes('ddp-dot') ? bad('client.js 仍有 ddp-dot 元素（旧的内联圆点写法）') : ok('client.js 已移除旧内联圆点')
   src.includes('position:absolute;right:7px') || src.includes('.panelEntry:hover')
     ? bad('client.js 状态点仍绝对定位到行右端（会和大头针重叠）')
     : ok('client.js 状态点不再占用行右端')
@@ -341,6 +346,24 @@ errorSnapshot.level === 'error' && errorSnapshot.browser.error === 'boom'
   ? ok('状态总线：任一组件报错 level=error')
   : bad('状态总线：noteFailure 未把 level 推到 error')
 clearedLevel === 'running' ? ok('状态总线：清错后回到 running') : bad(`清错后 level 应为 running，实际 ${clearedLevel}`)
+
+// 8e. 登录态继承：浏览器组件要能复制本机 cookie，且源码与文档都不能掩盖风险
+const cookiesFile = 'src/browser/cookies.mjs'
+exists(cookiesFile) ? ok(`存在 ${cookiesFile}`) : bad(`缺少 ${cookiesFile}（浏览器登录态继承）`)
+const cookiesSrc = exists(cookiesFile) ? readFileSync(path.join(ROOT, cookiesFile), 'utf8') : ''
+for (const fn of ['copyLoginState', 'findUserDataDir', 'listProfiles']) {
+  cookiesSrc.includes(`export function ${fn}`) ? ok(`cookies.mjs 导出 ${fn}`) : bad(`cookies.mjs 未导出 ${fn}`)
+}
+const browserSrc = readFileSync(path.join(ROOT, 'src/browser.mjs'), 'utf8')
+browserSrc.includes("cookies: 'inherit'")
+  ? ok('浏览器组件默认 cookies=inherit（继承本机登录态）')
+  : bad('浏览器组件默认未继承登录态（config.cookies 不是 inherit）')
+const browserDoc = exists('docs/BROWSER.md') ? readFileSync(path.join(ROOT, 'docs/BROWSER.md'), 'utf8') : ''
+browserDoc.includes('登录态') && browserDoc.includes('风险')
+  ? ok('docs/BROWSER.md 写了登录态与风险')
+  : bad('docs/BROWSER.md 缺少登录态/风险说明（用户要求仓库中说明）')
+const changelog = exists('CHANGELOG.md') ? readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8') : ''
+changelog.includes('cookie') ? ok('CHANGELOG 记录了 cookie 行为变化') : warn('CHANGELOG 未提 cookie 行为')
 
 // 9. 依赖数量仍为 0（只用 Node 内置 + react 单例）
 Object.keys(pkg.dependencies ?? {}).length === 0 ? ok('运行时依赖 0 个') : warn('出现了 dependencies')

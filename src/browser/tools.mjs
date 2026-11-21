@@ -32,10 +32,31 @@ const stepSchema = {
   },
 }
 
+const cookiesSchema = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    inherit: { type: 'boolean' },
+    source: { type: 'string' },
+    profile: { type: 'string' },
+    bytes: { type: 'number' },
+    count: { type: 'number' },
+    reason: { type: 'string' },
+  },
+}
+
 const errorSchema = {
   type: 'object',
   additionalProperties: true,
   properties: { code: { type: 'string' }, message: { type: 'string' }, hint: { type: 'string' } },
+}
+
+/** 把登录态继承结果压成一句话；没继承到就明说原因，不粉饰。 */
+function cookieNote(c) {
+  if (!c) return ''
+  if (c.inherit && typeof c.count === 'number') return ` · 登录态：${c.count} 个 cookie（源自 ${c.profile ?? '本机 profile'}）`
+  if (c.inherit) return ` · 登录态：已复制（源自 ${c.profile ?? '本机 profile'}），数量未知`
+  return ` · 登录态：未继承${c.reason ? `（${c.reason}）` : ''}`
 }
 
 export function browserToolSpecs(daemon, options = {}) {
@@ -60,13 +81,18 @@ export function browserToolSpecs(daemon, options = {}) {
           url: { type: 'string' },
           pid: { type: 'number' },
           docEpoch: { type: 'number' },
+          cookies: cookiesSchema,
           error: errorSchema,
         },
       },
-      render: (_a, v) => text(v?.ok ? `浏览器 ${v.state ?? 'running'} · ${v.url ?? 'about:blank'}` : `打开失败（${v?.error?.code ?? 'unknown'}）：${v?.error?.message ?? ''}`),
+      render: (_a, v) => text(v?.ok ? `浏览器 ${v.state ?? 'running'} · ${v.url ?? 'about:blank'}${cookieNote(v?.cookies)}` : `打开失败（${v?.error?.code ?? 'unknown'}）：${v?.error?.message ?? ''}`),
       handler: async (args) => {
         try {
           const status = await daemon.ensureStarted()
+          // 复制成功但一个 cookie 都读不出来，说明撞上 App-Bound Encryption：如实提示，不假装已登录
+          if (status?.cookies?.inherit && status.cookies.count === 0) {
+            log('[dsh-deputy/browser] 已复制本机 cookie 库，但新实例读到 0 个 cookie（浏览器启用了 App-Bound Encryption，见 docs/BROWSER.md）')
+          }
           if (typeof args?.url === 'string' && args.url.trim()) await daemon.navigate(args.url.trim())
           return { ok: true, ...daemon.status(), state: status.state }
         } catch (e) {
@@ -170,10 +196,14 @@ export function browserToolSpecs(daemon, options = {}) {
           url: { type: 'string' },
           docEpoch: { type: 'number' },
           refs: { type: 'number' },
+          cookies: cookiesSchema,
           error: { type: 'string' },
         },
       },
-      render: (_a, v) => text(`浏览器 ${v?.state ?? 'unknown'}${v?.pid ? ` · pid ${v.pid}` : ''}${v?.port ? ` · :${v.port}` : ''}${v?.error ? ` · ${v.error}` : ''}`),
+      render: (_a, v) =>
+        text(
+          `浏览器 ${v?.state ?? 'unknown'}${v?.pid ? ` · pid ${v.pid}` : ''}${v?.port ? ` · :${v.port}` : ''}${cookieNote(v?.cookies)}${v?.error ? ` · ${v.error}` : ''}`,
+        ),
       handler: async () => ({ ok: true, ...daemon.status() }),
     },
     {

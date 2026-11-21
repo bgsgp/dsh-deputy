@@ -1,7 +1,9 @@
 // 无依赖自检：node test/run-tests.mjs
 // 这些断言覆盖纯算法、闭环、桌面状态机与 HTTP 面板，不依赖 Windows。
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { scoreFrame, gridDelta, toGray, downscaleGray, dHash, hamming } from '../src/diff.mjs'
 import { packSheet, labelOf } from '../src/sheet.mjs'
 import { expandBox, verifyAction, cropGray, meanAbsDiff } from '../src/roi.mjs'
@@ -461,6 +463,10 @@ await test('客户端：sidebar.panellist + main 同 id 注册（stub 加载 cli
   try {
     const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
     new Function('require', src)(() => React)
+    // 状态点必须画在行文字（panelTitle）右边，而不是图标旁/行右端
+    assert.match(src, /_panelTitle/)
+    assert.match(src, /_panelTitle"]::after/)
+    assert.equal(src.includes('ddp-dot'), false)
     assert.ok(loaded, 'client.js 必须调用 window.__ModuleLoader__.load')
     assert.equal(loaded.id, 'dsh-deputy')
     const exp = loaded.factory(() => React)
@@ -547,6 +553,37 @@ await test('HTTP 面板：健康检查、合并采帧、坐标换算与输入校
   } finally {
     await viewer.stop()
     await session.close()
+  }
+})
+
+await test('登录态继承：复制 Local State + profile/Network/Cookies，源缺失不抛错', async () => {
+  const { copyLoginState, listProfiles, pickProfile, browserFlavor } = await import('../src/browser/cookies.mjs')
+  const root = mkdtempSync(join(tmpdir(), 'deputy-cookie-src-'))
+  mkdirSync(join(root, 'Default', 'Network'), { recursive: true })
+  writeFileSync(join(root, 'Local State'), 'local-state-bytes')
+  writeFileSync(join(root, 'Default', 'Network', 'Cookies'), 'cookies-db-bytes')
+  const dest = mkdtempSync(join(tmpdir(), 'deputy-cookie-dst-'))
+  try {
+    assert.equal(browserFlavor('C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'), 'edge')
+    assert.equal(browserFlavor('C:/Program Files/Google/Chrome/Application/chrome.exe'), 'chrome')
+    assert.deepEqual(listProfiles(root), ['Default'])
+    assert.equal(pickProfile(root, 'auto'), 'Default')
+    const res = copyLoginState({ sourceRoot: root, destDir: dest })
+    assert.equal(res.ok, true)
+    assert.equal(res.profile, 'Default')
+    assert.ok(res.bytes > 0)
+    assert.equal(readFileSync(join(dest, 'Default', 'Network', 'Cookies'), 'utf8'), 'cookies-db-bytes')
+    assert.equal(readFileSync(join(dest, 'Local State'), 'utf8'), 'local-state-bytes')
+    // 源目录/子目录缺失都只是「没继承到」，绝不能让浏览器起不来
+    const miss = copyLoginState({ sourceRoot: join(root, 'nope'), destDir: dest })
+    assert.equal(miss.ok, false)
+    assert.equal(miss.reason, 'NO_SOURCE')
+    const empty = mkdtempSync(join(tmpdir(), 'deputy-cookie-empty-'))
+    assert.equal(copyLoginState({ sourceRoot: empty, destDir: dest }).reason, 'NO_PROFILE')
+    assert.equal(copyLoginState({ sourceRoot: root, destDir: null }).reason, 'NO_DEST')
+  } finally {
+    // 测试目录留在 tmp，不删也无害；这里只断言存在性
+    assert.ok(existsSync(dest))
   }
 })
 
