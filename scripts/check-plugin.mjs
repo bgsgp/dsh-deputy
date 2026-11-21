@@ -365,6 +365,12 @@ browserDoc.includes('登录态') && browserDoc.includes('风险')
 const changelog = exists('CHANGELOG.md') ? readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8') : ''
 changelog.includes('cookie') ? ok('CHANGELOG 记录了 cookie 行为变化') : warn('CHANGELOG 未提 cookie 行为')
 
+// 8f. npm 发布脚本：Windows 上必须走 shell 调 npm（execFileSync('npm') 会 ENOENT）
+const publishSrc = exists('scripts/publish-npm.mjs') ? readFileSync(path.join(ROOT, 'scripts/publish-npm.mjs'), 'utf8') : ''
+publishSrc.includes("execSync(`npm ")
+  ? ok('publish-npm.mjs 用 shell 调 npm（Windows 可跑）')
+  : bad('publish-npm.mjs 未用 execSync 调 npm（Windows 上会 spawn ENOENT）')
+
 // 9. 依赖数量仍为 0（只用 Node 内置 + react 单例）
 Object.keys(pkg.dependencies ?? {}).length === 0 ? ok('运行时依赖 0 个') : warn('出现了 dependencies')
 

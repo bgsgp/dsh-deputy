@@ -2,6 +2,18 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.37
+
+### 修 npm 发布脚本在 Windows 上跑不起来
+- `scripts/publish-npm.mjs` 原来用 `execFileSync('npm', …)`：Windows 的 npm 是 `npm.cmd`，
+  Node 18.20+ 不允许免 shell spawn `.cmd`，于是 `npm publish --dry-run` 直接
+  `ENOENT: spawnSync npm`，dry-run 都没法验打包。
+- 改成 `execSync(`npm ${args.join(' ')}`, { cwd: stage, stdio: 'inherit' })`，交给 shell 解析
+  `npm` / `npm.cmd`；参数里没有空格，不需要转义。顺带消掉 `shell: true + args` 的 DEP0190 警告。
+- 现在 dry-run 正常打包：`dsh-deputy@1.3.36` → 46 files / 112.0 kB。真实发布仍需
+  `npm login`（本机 `npm whoami` 报 ENEEDAUTH，仓库版本 1.3.37 而 registry 还是 1.1.30）。
+- `check-plugin` 增加断言：发布脚本必须用 `execSync` 调 npm，防止回退。
+
 ## 1.3.36
 
 ### 侧栏状态点跟到行文字右边

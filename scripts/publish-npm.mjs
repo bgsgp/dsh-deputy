@@ -10,7 +10,7 @@
 //   node scripts/publish-npm.mjs --publish --tag next
 import { readFileSync, writeFileSync, mkdtempSync, cpSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { execFileSync } from 'node:child_process'
+import { execSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -54,7 +54,9 @@ try {
   if (!realPublish) args.push('--dry-run')
 
   console.log(`\n${realPublish ? '发布' : 'dry-run'}: npm ${args.join(' ')}\n`)
-  execFileSync('npm', args, { cwd: stage, stdio: 'inherit' })
+  // Windows 上 npm 是 .cmd 脚本，execFileSync 直接 spawn 会 ENOENT；
+  // 交给 shell 解析（npm / npm.cmd 都能命中），参数里没有空格，无需转义。
+  execSync(`npm ${args.join(' ')}`, { cwd: stage, stdio: 'inherit' })
 } finally {
   rmSync(stage, { recursive: true, force: true })
 }
