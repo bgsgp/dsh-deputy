@@ -1,6 +1,6 @@
 # dsh-deputy
 
-> DSH 的桌面副官：**变化即证据**，动作落在**自己的虚拟桌面**里。
+> DSH 的桌面副官：**变化即证据**，默认在你**自己的真实桌面**上动手（也可切回隐藏的隔离桌面）。
 > 桌面被当成稀疏信号源而不是截图流——本地打分，跨档才推一张 4×4 联系表；
 > 动作走 UIA 语义优先，每一步只校验它本该动的那块区域。
 
@@ -48,22 +48,39 @@ dsh plugin --profile web add dsh-deputy
 | **变化即证据** | 帧的价值 = 相对上一帧变了多少；0..1 分数分四档（still/minor/meaningful/major） |
 | **语义优先** | UIA `InvokePattern`/`ValuePattern` 打头，键鼠是兜底不是首选 |
 | **ROI 校验** | 动作后只比对它该影响的区域，并额外检测"别处有没有被带脏" |
-| **真开虚拟桌面** | 常驻宿主握着独立 Desktop，目标程序、采帧、取树、输入全在同一个桌面对象里 |
+| **两种桌面模式** | `user`（默认）：整屏 + `SendInput`，和你手动操作是同一张桌面；`isolated`：常驻宿主握独立 Desktop，`PrintWindow` + `PostMessage`，不抢焦点 |
 
 ---
+
+## 两种桌面模式
+
+`config.desktop.mode` 决定动作落在哪张桌面上（默认 `user`）：
+
+| 模式 | 桌面 | 你看到的 | 采帧 | 点击 / 打字 | 会抢你的鼠标吗 |
+|---|---|---|---|---|---|
+| `user`（默认） | 你自己的真实桌面 | 整屏（真机 1920×1080，含任务栏、其它窗口） | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：点击前把目标窗口提到前台 |
+| `isolated` | 宿主 `CreateDesktopW` 新建的隐藏桌面 | 该桌面里的窗口（不是整屏） | 逐窗口 `PrintWindow`（无 DWM，桌面级 BitBlt 全黑） | `PostMessage` 直投窗口 | 不会 |
+
+为什么默认是 `user`：豆包那类「电脑操作」就是**在你当前会话里**整屏截图 + 注入合成键盘鼠标事件。
+而 `CreateDesktop` 隐藏桌面拿不到合成画面（只能逐窗口抓，所以看起来"只有左上角"），它不是输入桌面、
+`SendInput` 实测接受 0/N 个事件，Chromium 这类自绘输入的窗口还会丢 `PostMessage` —— 表现就是"点不动"。
+
+代价也说清楚：`user` 模式下自动化**真的占用鼠标键盘**，跑任务时不要抢鼠标；需要"不打断你"时把
+`mode` 切回 `isolated`（能力受限，但完全不碰你的桌面）。
 
 ## 为什么要"常驻宿主"
 
 Windows 桌面对象是引用计数的：建它的进程一退出，桌面就没了。所以不能"建一下记个 handle
-下次再用"，必须有一个活着的宿主攒着它：
+下次再用"，必须有一个活着的宿主攒着它。两种模式共用同一个宿主进程，只是桌面对象不同：
 
 ```
-DesktopSession.open()  ──► 宿主: CreateDesktopW + SetThreadDesktop
-startApp(exe)          ──► 宿主: CreateProcessW(lpDesktop="WinSta0\deputy-x")
-capture()              ──► 宿主: PrintWindow 逐窗口捕获该桌面画面
+DesktopSession.open()  ──► 宿主: user → 无桌面对象（操作当前桌面）
+                                isolated → CreateDesktopW + SetThreadDesktop
+startApp(exe)          ──► 宿主: CreateProcessW（isolated 带 lpDesktop="WinSta0\deputy-x"）
+capture()              ──► 宿主: user → 整屏 BitBlt；isolated → PrintWindow 逐窗口
 tree()                 ──► 宿主: UIA RootElement（= 线程所在桌面）
-input(click/type)      ──► 宿主: PostMessage(WM_*)
-close()                ──► 宿主退出 → 桌面销毁，不残留
+input(click/type)      ──► 宿主: user → SendInput；isolated → PostMessage(WM_*)
+close()                ──► 宿主: isolated 退出即销毁桌面；user 只退出，不碰你的窗口
 ```
 
 这就是"真的在里面操作"和"只是在旁边截图"的区别。细节见 [docs/DESKTOP.md](docs/DESKTOP.md)。
@@ -73,9 +90,9 @@ close()                ──► 宿主退出 → 桌面销毁，不残留
 ## 架构
 
 ```
-ISOLATE  独立 Desktop + 受限令牌 + Job Object（不抢焦点，不乱写）
+DESKTOP  user：真实桌面（整屏 + SendInput）／isolated：独立 Desktop + 受限令牌
    │
-SENSOR   隔离桌面内采帧（灰度）
+SENSOR   目标桌面内采帧（灰度，整屏或逐窗口）
    │
 SENSE    dHash 距离 + 8×8 网格变化 → 0..1 分数 → 四档
    │      跨档帧进缓冲，满 16 帧 → 4×4 拼图（标签烧进图里）
@@ -137,11 +154,11 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 ### 界面：侧栏里的一页
 
 左侧「应用」栏（新建 / 搜索 / 自定义 / QQ机器人 / 定时任务 / …）底部会多一行
-**「DSH操作电脑」**。点它，中央面板切到整页的隔离桌面：
+**「DSH操作电脑」**。点它，中央面板切到整页的桌面画面：
 
-- 每 0.7 秒拉一帧灰度画面，按宿主真实帧尺寸与窗口可用区域等比完整显示；点画面 = 在隔离桌面里点一下（缩放与居中留白均正确换算，原生拖图已禁用）；
-- 「打开桌面」起会话（Windows 上弹 UAC）、「收起桌面」回收；
-- 桌面里还没窗口时（`NOWINDOW`）不再给一张全黑图，而是提示 + 「启动 Edge / 启动记事本」按钮；
+- 每 0.7 秒拉一帧灰度画面，按宿主真实帧尺寸与窗口可用区域等比完整显示；点画面 = 在目标桌面里点一下（缩放与居中留白均正确换算，原生拖图已禁用）；
+- 「打开桌面」起会话（`isolated` 模式要建桌面所以弹 UAC，`user` 模式不弹）、「收起桌面」回收；
+- `isolated` 桌面里还没窗口时（`NOWINDOW`）不再给一张全黑图，而是提示 + 「启动 Edge / 启动记事本」按钮（`user` 模式永远有整屏画面，不会 `NOWINDOW`）；
 - 这页不是浮窗，也不占会话；切回对话在侧栏点一下即可。
 
 行文字右边还有一个小状态点（跟着标题走，避开悬停出现的大头针），读 `/api/status`（两个组件共用一条状态总线）：
@@ -160,8 +177,8 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `roi.mjs` 校验 | ✅ 实现 + 单测 | 三分 verdict |
 | `budget.mjs` 预算 | ✅ 实现 + 单测 | 三档降级 |
 | `runner.mjs` 闭环 | ✅ 实现 + 单测（注入式，无需 Windows） | 重试 / 熔断 |
-| `desktop.mjs` 虚拟桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭 |
-| `scripts/windows-desktop.ps1` | ✅ 真机验证（0.2.2-rc.5 宿主） | 常驻宿主：建桌面 / 启动 / 逐窗口 `PrintWindow` 捕获 / 取树 / `PostMessage` 点击与打字。已实测在隔离桌面打开 Edge 拍到 B 站首页，并在记事本里点击正文后打出 `deputy desktop hello 123`（截图可见） |
+| `desktop.mjs` 桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭；`mode=user\|isolated` 透传给宿主 |
+| `scripts/windows-desktop.ps1` | ✅ 双模式真机验证 | 常驻宿主 `-Mode user\|isolated`。`user`：整屏 1920×1080 捕获 + `SendInput`，实测点开记事本正文打出 `deputy user desktop ok 123`；`isolated`：建桌面 + 逐窗口 `PrintWindow` + `PostMessage`，实测打开 Edge 拍到 B 站首页并打出 `deputy desktop hello 123` |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 按 DSH 0.2.2 插件 ABI 机检（清单 / 工具 / 图片 / icon） |
 | `scripts/publish-npm.mjs` | ✅ 可用 | 舞台打包 + 直接 npm publish（标准三段版本） |
@@ -169,15 +186,16 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `status.mjs` 状态总线 | ✅ 实现 + 单测 | 两组件各写一段，合成 `error > running > idle` 一个点 |
 | MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
 | 侧栏入口（`client.js`） | ✅ 真机验证（0.2.2-rc.5） | 侧栏「应用」一行「DSH操作电脑」+ 中央整页；`sidebar.panellist` / `main` 同 id 注册，`check-plugin` 防回退到 `shell.overlay` |
-| DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），桌面自动化仍待真机回归 |
+| DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），两种桌面模式均已真机跑通 |
 | 浏览器组件（`src/browser/`） | 🟡 代码补全，待真机回归 | 1.3.39 已加入结构化等待、真实遮挡阻断、多标签、上传下载、截图附件、幂等和异常状态恢复；保持五工具 ABI。OOPIF iframe 仍是边界。本轮按用户要求未启动浏览器实测，详见 [docs/BROWSER.md](docs/BROWSER.md) |
 
-**已知未验证点**：UAC/安全桌面对隔离桌面的抢占、靠 `GetKeyState` 判断修饰键的快捷键
-（部分浏览器 `Ctrl+L` 之类不认投递的按键）。
+**已知未验证点**：`isolated` 模式下 UAC/安全桌面抢占、靠 `GetKeyState` 判断修饰键的快捷键
+（部分浏览器 `Ctrl+L` 之类不认投递的按键）；`user` 模式在高 DPI 多屏、缩放非 100% 的副屏上坐标换算。
+**已知代价**：`user` 模式会占用真实鼠标键盘（点击先把目标窗口提到前台），跑任务时别抢鼠标。
 已解决（真机）：`SetThreadDesktop` 在 PowerShell 里必须放到"从未建过窗口"的后台 STA 线程；
-隔离桌面拍画面必须用逐窗口 `PrintWindow`（桌面级 BitBlt 全黑）；`SendInput` 在隔离桌面
-接受 0/N 个事件，点击/打字必须用 `PostMessage` 投递到目标窗口。
-真机第一步先看 `deputy_desktop { op: "open" }` 返回的 `attached` 是否为 true。
+`isolated` 桌面拍画面必须用逐窗口 `PrintWindow`（桌面级 BitBlt 全黑）、输入必须用 `PostMessage`；
+`user` 模式必须先 `SetProcessDPIAware`，否则 150% 缩放下 `GetSystemMetrics` 只给 1280×720、截图与点击错位。
+真机第一步先看 `deputy_desktop { op: "status" }` 的 `state` 与宿主回执里的 `mode`。
 
 ---
 
@@ -210,13 +228,13 @@ src/
   uia-bridge.mjs  一次性 PowerShell UIA 后端桥
   status.mjs      两组件共享的状态总线（合成侧栏那个状态点）
   registry.mjs    toParameters / registerTools（0.2.x 工具注册的公共层）
-  os.mjs          组件 dsh-deputy/os：隔离桌面 + 4 个 deputy_* 工具
+  os.mjs          组件 dsh-deputy/os：桌面会话（默认真实桌面）+ 4 个 deputy_* 工具
   browser.mjs     组件 dsh-deputy/browser：浏览器 daemon + 5 个 browser_* 工具
   browser/        launch / cdp / daemon / snapshot / act / wait / tools / cookies / errors
   index.mjs       兼容入口：只 `export * from './os.mjs'`
   mcp/server.mjs  最小 MCP stdio 服务
 scripts/
-  windows-desktop.ps1  常驻宿主：建桌面 / 启动 / 采帧 / 取树 / 输入
+  windows-desktop.ps1  常驻宿主：user（整屏 + SendInput）／isolated（建桌面 + PrintWindow + PostMessage）
   windows-uia.ps1      一次性 UIA（无隔离桌面，验证用）
   windows-session.ps1  早期碎片版（留作对照）
   check-plugin.mjs     注册一致性自检

@@ -39,7 +39,7 @@ export function quoteWindowsArg(value) {
 }
 
 /** 常驻宿主：一行 JSON 一条命令，一行 JSON 一条回执。 */
-export function createHostTransport({ script = path.join(SCRIPTS, 'windows-desktop.ps1'), timeoutMs = 12000 } = {}) {
+export function createHostTransport({ script = path.join(SCRIPTS, 'windows-desktop.ps1'), timeoutMs = 12000, mode = 'isolated' } = {}) {
   let child = null
   let seq = 0
   const waiting = new Map()
@@ -57,7 +57,7 @@ export function createHostTransport({ script = path.join(SCRIPTS, 'windows-deskt
 
     const proc = spawn(
       POWERSHELL,
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Op', 'host', '-Name', name],
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, '-Op', 'host', '-Name', name, '-Mode', mode],
       { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
     )
     child = proc
@@ -183,8 +183,10 @@ export function createFakeTransport() {
 }
 
 export class DesktopSession {
-  constructor({ transport, name, captureWidth = 1280, captureHeight = 800 } = {}) {
-    this.transport = transport ?? createHostTransport()
+  constructor({ transport, name, captureWidth = 1280, captureHeight = 800, mode = 'isolated' } = {}) {
+    this.transport = transport ?? createHostTransport({ mode })
+    // 'user' = 直接操作当前输入桌面（整屏截图 + SendInput）；'isolated' = 独立桌面（窗口截图 + PostMessage）。
+    this.mode = mode
     this.name = name ?? `deputy-${Math.random().toString(16).slice(2, 8)}`
     this.state = 'idle'
     this.pid = null
@@ -210,7 +212,8 @@ export class DesktopSession {
     const opening = (async () => {
       try {
         const opened = await this.transport.start(this.name)
-        if (opened?.attached === false) {
+        if (opened?.mode) this.mode = opened.mode
+        if (this.mode !== 'user' && opened?.attached === false) {
           throw new DesktopError(`宿主未能附着到隔离桌面（Win32 ${opened.attachErr ?? 'unknown'}）`, 'EATTACH')
         }
         this.state = 'opened'

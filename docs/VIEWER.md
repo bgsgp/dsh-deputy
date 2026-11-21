@@ -83,13 +83,15 @@ ctx.slots.inject('main', () =>
 client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.state
            ──GET /api/status ──► status.mjs 的合成快照（os + browser 两段 + level）
            ──GET /api/frame  ──► capture() → 灰度 → encodeGrayPng → base64
-           ──POST /api/input ──► 归一化坐标 → 像素 → 宿主 SendInput
-           ──POST /api/open  ──► CreateDesktopW（Windows 上弹 UAC）
+           ──POST /api/input ──► 归一化坐标 → 像素 → 宿主（user: SendInput／isolated: PostMessage）
+           ──POST /api/open  ──► user: 直接握当前桌面；isolated: CreateDesktopW（弹 UAC）
            ──POST /api/launch ► 宿主 CreateProcessW（支持 app 预设：edge / notepad）
-           ──POST /api/close ──► 宿主退出，桌面销毁
+           ──POST /api/close ──► 宿主退出（isolated 才销毁桌面，user 不碰你的窗口）
 ```
 
 刷新率 700ms：足够手动点选，又不会把宿主的 BitBlt 打满。**这不是直播**，是有节奏的采样。
+默认 `config.desktop.mode = 'user'`：帧是**整屏**（真机 1920×1080），点画面就是在你自己桌面上点；
+切到 `isolated` 则帧变成该隐藏桌面里最大窗口的画面。
 切到别的页就不再拉帧（组件卸载时清定时器），不会在后台空转。
 
 点击是**归一化坐标**（0..1）：页面被缩放、窗口宽窄变化，命中点不变。宿主协议要像素，
@@ -115,25 +117,29 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 ```
 
 `level` 的优先级是 `error > running > idle`：任一组件最近出过错就是红，任一组件在跑就是绿，
-都没开是灰。`client.js` 每 2 秒拉一次（没人订阅就停），把它渲染成侧栏那一行**图标右边**的小圆点。
+都没开是灰。`client.js` 每 2 秒拉一次（没人订阅就停），把它画到侧栏那一行**文字右边**（`「DSH操作电脑」 •`）。
 
 注意点位：侧栏行的右端 0..28px 属于 unpin（大头针）按钮（`.panelUnpin{position:absolute;right:0}`，
-悬停才显形），所以状态点**不做绝对定位**，而是内联进 `.ddp-glyph`（图标 + 4px gap + 点），
-随图标走；缩成窄栏（36px 图标座）时也依然是图标右侧的一点。
+悬停才显形），所以状态点**不做绝对定位**，也不用改侧栏 DOM —— 而是用
+`[class*="_panelTitle"]::after` 在行文字后面画一个点，颜色由 `:has(.ddp-glyph[data-level=…])` 决定。
+窄栏（标题被隐藏）时点随之消失，不会飘在图标旁边跟大头针抢位置。
 
 `dsh-deputy/os` 与 `dsh-deputy/browser` 是两个 Cordis 条目、互不 inject，
 所以状态放在**模块级总线**而不是 ctx 服务里——同进程、同一份模块实例，两边都写得到。
 
 ## 空桌面不再回黑图
 
-隔离桌面里一个窗口都没有时，宿主回 `{ code: 'NOWINDOW' }`（不再回退到桌面级 BitBlt 的黑图）。
+`isolated` 桌面里一个窗口都没有时，宿主回 `{ code: 'NOWINDOW' }`（不再回退到桌面级 BitBlt 的黑图）。
+`user` 模式永远有整屏画面，不会出现 `NOWINDOW`。
 面板把它渲染成「桌面里还没有窗口」+「启动 Edge」「启动记事本」两个按钮，
 点按钮走 `POST /api/launch { app: 'edge' | 'notepad' }`，宿主按预设路径与参数起进程。
 
 ## 安全边界
 
 - 端点只绑 `127.0.0.1`，不监听 `0.0.0.0`；
-- 所有动作都落在**隔离桌面**里，不会碰到你正在用的主桌面；
+- `isolated`：所有动作都落在**隔离桌面**里，不会碰到你正在用的主桌面；
+- `user`（默认）：动作**确实**落在你的真实桌面上（会抢焦点、会动鼠标键盘）—— 这是用户显式选择的能力，
+  不是「偷偷降级」，`config.desktop.mode` 可随时切回 `isolated`；
 - 没有中间人入口：不提供任意 shell 命令路由，只有 `open/close/launch/capture/input`；
 - 风险点：本机进程，以及浏览器里能够请求回环地址的页面，都可能访问这个端口。
   当前为兼容 DSH WebView 保留了跨域响应，因此不要把它当成认证后的远程控制接口；
@@ -143,7 +149,7 @@ client.js  ──GET /api/health ──► viewer.mjs ──► DesktopSession.s
 
 | 项 | 现状 |
 |---|---|
-| 真实画面 | 只在 Windows 上才有（宿主是 PowerShell + 逐窗口 `PrintWindow`）；其它平台 `/api/frame` 会明确回"桌面未打开"，并告诉客户端 `platform` |
+| 真实画面 | 只在 Windows 上才有（宿主是 PowerShell；`user` 整屏 BitBlt、`isolated` 逐窗口 `PrintWindow`）；其它平台 `/api/frame` 会明确回"桌面未打开"，并告诉客户端 `platform` |
 | 鼠标移动 / 滚动 / 键盘 | 目前面板只发了 `click` 与 `type`；滚轮与拖拽需要给宿主加 `input.op` |
 | 帧率 | 700ms 采样，不是流；拖窗口、拖动控件这类连续操作观感一般 |
 | 中央面板 | 打开这页时中央区被整页占用，会话在另一个 key；靠侧栏切回对话 |

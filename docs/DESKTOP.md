@@ -1,7 +1,8 @@
-# 虚拟桌面执行层：从"能开"到"真的在里面操作"
+# 桌面执行层：真实桌面（默认）与隔离桌面两种模式
 
-这篇是 0.0.x 阶段最要紧的一层。前面几版（`ISOLATION.md`）只讲了原理，
-`windows-session.ps1` 也只是"建桌面 / 启动 / 关掉"的碎片；这一版把它做成**活着的会话**。
+这篇是两个模式的执行层。`ISOLATION.md` 讲隔离原理；这一版把它做成**活着的会话**，
+并且承认一个事实：**想「像人一样正常操作电脑」，就必须在真实桌面上做**（整屏 + 注入合成事件），
+隔离桌面是「不打扰用户」的那条备选路径，两者共用同一个宿主进程。
 
 ## 1. 为什么必须常驻
 
@@ -31,17 +32,46 @@ close()                ────────► 宿主退出 → 桌面销毁
 这就是"真的在里面操作"与"只是在旁边截图"的区别——采帧、取树、输入、目标进程，
 四者处在同一个桌面对象上。
 
+## 1.1 两种模式：`-Mode user`（默认）与 `-Mode isolated`
+
+宿主脚本的参数是 `param([Parameter(Mandatory=$true)][string]$Op, [string]$Name='deputy-default', [ValidateSet('isolated','user')][string]$Mode='isolated')`，
+JS 侧的默认值来自 `config.desktop.mode`（**默认 `user`**），经 `createHostTransport({ mode })` 变成命令行参数 `-Mode user`。
+
+| 维度 | `user`（默认） | `isolated` |
+|---|---|---|
+| 桌面对象 | 无（操作当前输入桌面） | `CreateDesktopW` + `SetThreadDesktop` |
+| UAC | 不需要 | 需要管理员（`GENERIC_ALL`） |
+| 画面 | 整屏 `Capture([IntPtr]::Zero, ScreenWidth, ScreenHeight)`，回 `source:'screen'` | 逐窗口 `CaptureWindow`，回 `source:'window'` |
+| 点击 | `WindowFromPoint` → `SetForegroundWindow` → `SetCursorPos` → `SendInput`（`MOUSEEVENTF_*`） | `PostMessage` `WM_MOUSEMOVE/LBUTTONDOWN/UP` |
+| 打字 | `SendInput` + `KEYEVENTF_UNICODE`（逐字符 down/up，IME 与自绘窗口都认） | `PostMessage` `WM_CHAR` |
+| 快捷键 | `SendInput` `VK` down/up（`GetKeyState` 型快捷键也认） | `PostMessage` `WM_KEYDOWN/UP`（部分浏览器不认） |
+| 关会话 | 只退出宿主，**不** `CloseDesktop`、**不**杀 `$launched` 里的进程 | 退出即销毁桌面与里面所有窗口 |
+| 抢不抢用户 | 抢（点击会把目标窗口提到前台） | 不抢 |
+
+为什么默认改成 `user`：豆包那类「电脑操作」= **当前用户会话整屏截图 + 合成鼠标键盘事件**。
+隐藏桌面拿不到 DWM 合成（桌面级 `BitBlt` 全黑，只能逐窗口 `PrintWindow`，用户看起来"只有左上角一块"），
+它不是输入桌面（`SendInput` 实测 0/N），`PostMessage` 又会被 Chromium 这类自绘输入的窗口丢掉 ——
+三条叠起来就是"点不动"。
+
+DPI 一条必须记住：`user` 模式启动后立刻调 `[Deputy.Desk2]::MakeDpiAware()`（内部 `SetProcessDPIAware`）。
+不声明 DPI 感知时，150% 缩放下 `GetSystemMetrics(SM_CXSCREEN)` 只给 1280×720，而我们截的是物理 1920×1080，
+点击坐标会整体偏 —— 真机上第一帧 1280×720、下一帧才变 1920×1080，就是这个坑。
+
+切换方式：`cordis.patch.yml` 里 `dsh-deputy-os` 的 `config.desktop.mode: user`（或安装后在插件配置里改），
+改成 `isolated` 即回到"完全不碰你桌面"的老行为。
+
 ## 2. 三个硬性约束（写代码前必须先接受）
 
 | 约束 | 后果 | 本项目的做法 |
 |---|---|---|
-| `SetThreadDesktop` 只能在线程**尚未创建任何窗口**前调用 | 中途切桌面一定失败 | 宿主进程启动时立即切，之后所有操作都在该桌面做 |
-| 非活动桌面不能用 `Windows.Graphics.Capture`；也没有 DWM 合成，桌面级 `BitBlt` 全黑 | 直接截桌面永远拿不到画面 | 逐窗口 `PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT=2)`：枚举该桌面可见窗口取最大者（可限定 pid），失败才回退桌面 BitBlt |
-| 隔离桌面不是"输入桌面"，`SendInput` 的事件只会投到用户当前桌面（实测被接受 0/N） | 鼠标键盘在隔离桌面里完全无效 | 点击/输入改为 `PostMessage` 直接投给该桌面里的目标窗口：`WindowFromPoint` 定窗口、`WM_LBUTTONDOWN/UP` 定位、`WM_CHAR` 打字、`WM_KEYDOWN/UP` 组合键 |
+| `SetThreadDesktop` 只能在线程**尚未创建任何窗口**前调用（仅 `isolated`） | 中途切桌面一定失败 | 宿主进程启动时立即切，之后所有操作都在该桌面做；`user` 模式不切桌面 |
+| 非活动桌面不能用 `Windows.Graphics.Capture`；也没有 DWM 合成，桌面级 `BitBlt` 全黑（仅 `isolated`；`user` 桌面有合成，整屏 BitBlt 正常） | 直接截隔离桌面永远拿不到画面 | 逐窗口 `PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT=2)`：枚举该桌面可见窗口取最大者（可限定 pid），失败才回退桌面 BitBlt |
+| 隔离桌面不是"输入桌面"，`SendInput` 的事件只会投到用户当前桌面（实测被接受 0/N，仅 `isolated`） | 鼠标键盘在隔离桌面里完全无效 | 点击/输入改为 `PostMessage` 直接投给该桌面里的目标窗口：`WindowFromPoint` 定窗口、`WM_LBUTTONDOWN/UP` 定位、`WM_CHAR` 打字、`WM_KEYDOWN/UP` 组合键 |
 | `CreateDesktopW` 用 `GENERIC_ALL` 需要管理员 | 普通权限直接被拒 | **显式报错**，绡不静默降级到主桌面 |
 
-第三条是刻意的：降级到主桌面意味着"用户正在用的界面被自动化乱动"，这比任务失败严重得多。
-`DesktopSession` 里没有任何"悄悄退回主桌面"的分支。
+第三条仍然成立：宿主**不会**因为隔离桌面失败就悄悄退回主桌面 —— 想操作真实桌面只有一条路，
+就是用户显式把 `mode` 配成 `user`。`user` 模式也不是降级，而是另一种明确的语义：
+自动化正在真的动用户界面，所以 `close()` 绝不 `CloseDesktop`、绝不杀 `$launched` 里的进程。
 
 ## 3. 状态机
 
@@ -62,13 +92,15 @@ idle ──open()──► opened ──startApp()──► running ──close(
 副作用：PowerShell 自身的隐藏控制台窗口也会出现在树里（`pid` 字段可用于过滤）——
 这是原型阶段的已知噪声，生产版应换成无窗口的编译 worker。
 
-## 5. 与"豆包式虚拟桌面"的差距清单
+## 5. 与"豆包式电脑操作"的差距清单
 
-已经对齐的部分：独立桌面、不抢焦点、目标程序整体隔离、采帧与输入都在隔离域内。
+`user` 模式已经对齐的部分：**整屏截图、在你当前会话里注入合成事件、点击会切前台** —— 这正是豆包/UI-TARS
+那一套的主路径（需要隔离时它们用远端虚拟机/VNC，而不是 `CreateDesktop`）。另外还保留了 `isolated` 这条
+不打扰用户的路径，这是豆包不给的选项。
 
 还没对齐的：
 
-1. **无窗口 worker** —— 去掉 PowerShell 的隐藏控制台，UIA 树才干净。
+1. **无窗口 worker** —— 去掉 PowerShell 的隐藏控制台，`isolated` 的 UIA 树才干净。
 2. **毫秒级输入时序** —— 现在每次点击/打字都是走 PS 的一轮调用，延迟在 10ms 量级；
    `WM_CHAR` 逐字符投递，高频拖动、IME 组合输入会力不从心。
 3. **WGC 快路径** —— 前台/可见场景切换回 `Windows.Graphics.Capture`，画质与 CPU 都好得多；

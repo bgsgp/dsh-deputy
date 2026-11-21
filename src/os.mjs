@@ -38,6 +38,9 @@ export const config = {
   roi: {},
   budget: {},
   desktop: {
+    // user = 操作本机真实桌面（豆包 / UI-TARS 那种：整屏截图 + SendInput）；
+    // isolated = 独立桌面（隔离性更好，但没有 DWM、也不能用 SendInput）。默认 user。
+    mode: 'user',
     name: null,
     prelaunch: null,
     captureWidth: 1280,
@@ -55,11 +58,13 @@ export const state = { session: null, deputy: null, viewer: null }
 function ensureSession(deputyConfig) {
   if (state.session) return state.session
   const d = deputyConfig.desktop ?? {}
+  const mode = d.mode === 'isolated' ? 'isolated' : 'user'
   state.session = new DesktopSession({
-    transport: createHostTransport(),
+    transport: createHostTransport({ mode }),
     name: d.name ?? undefined,
     captureWidth: d.captureWidth,
     captureHeight: d.captureHeight,
+    mode,
   })
   return state.session
 }

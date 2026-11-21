@@ -762,17 +762,21 @@ await test('客户端：侧栏注册、监视窗等比适配与点击坐标换�
   }
 })
 
-await test('宿主脚本：输入投递不用 SendInput，且保留 UTF-8 BOM', async () => {
+await test('宿主脚本：user 模式走 SendInput、isolated 走 PostMessage，且保留 UTF-8 BOM', async () => {
   const raw = readFileSync(new URL('../scripts/windows-desktop.ps1', import.meta.url))
   assert.equal(raw[0], 0xef)
   assert.equal(raw[1], 0xbb)
   assert.equal(raw[2], 0xbf)
   const ps1 = raw.toString('utf8')
-  // 隔离桌面不是输入桌面：SendInput 只会投到用户主桌面（实测 0/N 被接受）
+  // user 模式：真实桌面是输入桌面，SendInput 才有效（隔离桌面实测 0/N）
+  for (const needle of ['ValidateSet(\'isolated\', \'user\')', '$isUser', 'ClickUser', 'TypeUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware']) {
+    assert.ok(ps1.includes(needle), '宿主脚本缺少 ' + needle)
+  }
+  // isolated 模式：非输入桌面，只能 PostMessage 投递
   for (const needle of ['PostMessage', 'WindowFromPoint', 'ScreenToClient', 'WM_CHAR', 'GetGUIThreadInfo']) {
     assert.ok(ps1.includes(needle), '宿主脚本缺少 ' + needle)
   }
-  assert.equal(ps1.includes('SendChecked(events'), false)
+  assert.ok(ps1.includes('-not $isUser'), 'user 模式必须跳过 CloseDesktop/杀进程')
 })
 
 await test('HTTP 面板：健康检查、合并采帧、坐标换算与输入校验', async () => {

@@ -383,7 +383,7 @@ publishSrc.includes("execSync(`npm ")
   ? ok('publish-npm.mjs 用 shell 调 npm（Windows 可跑）')
   : bad('publish-npm.mjs 未用 execSync 调 npm（Windows 上会 spawn ENOENT）')
 
-// 8g. 宿主输入：隔离桌面不是输入桌面，SendInput 必然 0/N，必须走 PostMessage
+// 8g. 宿主双模式：user 走 SendInput 注入真实桌面；isolated 走 PostMessage（非输入桌面）
 const ps1Path = 'scripts/windows-desktop.ps1'
 if (exists(ps1Path)) {
   const raw = readFileSync(path.join(ROOT, ps1Path))
@@ -392,15 +392,18 @@ if (exists(ps1Path)) {
     ? ok('windows-desktop.ps1 带 UTF-8 BOM（无 BOM 会被 CP936 解码吞换行）')
     : bad('windows-desktop.ps1 缺 UTF-8 BOM —— Windows PowerShell 会按 CP936 解码并报语法错误')
   const ps1 = raw.toString('utf8')
+  for (const needle of ['ValidateSet(\'isolated\', \'user\')', '$isUser', 'ClickUser', 'TypeUser', 'KeyUser', 'LaunchUser', 'SendChecked', 'SetForegroundWindow', 'SetProcessDPIAware']) {
+    ps1.includes(needle) ? ok('宿主真实桌面分支用到 ' + needle) : bad('宿主缺少 ' + needle + '（user 模式点不动/打不了字/截图错位）')
+  }
   for (const needle of ['PostMessage', 'WindowFromPoint', 'ScreenToClient', 'WM_CHAR', 'GetGUIThreadInfo']) {
-    ps1.includes(needle) ? ok('宿主输入用到 ' + needle) : bad('宿主输入缺少 ' + needle + '（隔离桌面里点不动/打不了字）')
+    ps1.includes(needle) ? ok('宿主隔离桌面分支用到 ' + needle) : bad('宿主隔离桌面分支缺少 ' + needle)
   }
   ps1.includes('SendInput 注入的事件会落到用户主桌面')
-    ? ok('宿主注释写明了 SendInput 不能用（隔离桌面非输入桌面）')
-    : warn('宿主未注释说明 SendInput 的隔离桌面限制')
-  ps1.includes('SendChecked(events')
-    ? bad('点击/组合键仍在用 SendInput（SendChecked），隔离桌面里会失败')
-    : ok('点击/组合键已不再走 SendInput')
+    ? ok('宿主注释写明了 SendInput 只对真实桌面有效')
+    : warn('宿主未注释说明 SendInput 的桌面限制')
+  ps1.includes('-not $isUser')
+    ? ok('user 模式不关闭用户桌面、不杀用户进程')
+    : bad('user 模式缺少 $isUser 保护（可能 CloseDesktop 或杀掉用户进程）')
 } else {
   bad('缺少 ' + ps1Path)
 }

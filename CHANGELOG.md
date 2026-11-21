@@ -2,6 +2,29 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.42
+
+### 默认改在「真实桌面」上操作（对齐豆包式电脑操作）
+- **为什么改**：旧实现用 `CreateDesktop` 建隐藏桌面 —— 该桌面没有 DWM 合成，桌面级 `BitBlt` 全黑，
+  只能逐窗口 `PrintWindow`，所以面板里看到的永远"只有窗口、不是桌面"；它也不是输入桌面，
+  `SendInput` 被接受 `0/N`，退而用 `PostMessage` 又会被 Chromium 这类自绘输入的窗口丢掉 —— 表现就是**点不动**。
+  豆包/UI-TARS 那一套是**在当前用户会话里整屏截图 + 注入合成事件**，这才是"正常用户桌面"。
+- **宿主双模式**：`windows-desktop.ps1` 新增 `-Mode isolated|user`（JS 侧 `config.desktop.mode`，**默认 `user`**）。
+  `user`：不建桌面，整屏 `Capture`、`ClickUser`（`WindowFromPoint` → `SetForegroundWindow` → `SetCursorPos` → `SendInput`）、
+  `TypeUser`（`KEYEVENTF_UNICODE` 逐字符）、`KeyUser`（`VK` down/up）、`LaunchUser`；
+  `isolated`：保留原 `CreateDesktop` + `PrintWindow` + `PostMessage` 路径。
+  `user` 模式的 `close` **绝不** `CloseDesktop`、**绝不**杀 `$launched` 里的进程。
+- **DPI 修正**：宿主启动即 `SetProcessDPIAware`（150% 缩放下 `GetSystemMetrics` 会只给 1280×720，
+  与实际 1920×1080 帧错位，点击整体偏）。
+- **接线**：`createHostTransport({ mode })` 追加 `-Mode`；`DesktopSession.mode` 以宿主回执为准，
+  `user` 模式下不校验 `attached`；`cordis.patch.yml` 的 `dsh-deputy-os` 写 `mode: user`。
+- **真机证据**：`user` 模式整屏 1920×1080 捕获（任务栏、DSH 窗口、防火墙浮窗都在），点击记事本正文后
+  打出 `deputy user desktop ok 123`（截图 `deputy-user-3.png`）；`isolated` 模式仍能建桌面、开 Edge 到 B 站。
+- 仍是 51 项自检（宿主测试改为「user 走 SendInput、isolated 走 PostMessage，且保留 UTF-8 BOM」）；
+  `check-plugin` 的宿主段改为双模式断言（`ValidateSet`/`$isUser`/`ClickUser`/`TypeUser`/`SendChecked`/
+  `SetForegroundWindow`/`SetProcessDPIAware` + 原 `PostMessage` 系列 + BOM + `-not $isUser` 保护）。
+- 代价与边界：`user` 模式会真的占用鼠标键盘（点击会切前台）；高 DPI 多屏/非 100% 缩放的副屏坐标换算未验证。
+
 ## 1.3.41
 
 ### 隔离桌面里的点击与打字真正可用（真机）

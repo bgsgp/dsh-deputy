@@ -1,7 +1,7 @@
 # dsh-deputy — DSH bundle patch layer
 #
 # 一个包、两个 Cordis 组件（插件管理器里显示成两行，和 billion-context 的做法一致）：
-#   dsh-deputy/os      → src/os.mjs      隔离桌面 + 桌面面板端点 + deputy_* 四个工具
+#   dsh-deputy/os      → src/os.mjs      桌面会话（默认操作真实桌面）+ 面板端点 + deputy_* 四个工具
 #   dsh-deputy/browser → src/browser.mjs 浏览器操作骨架（CDP daemon）+ browser_* 五个工具
 # insert 的 name 走 package.json 的 exports 子路径；插件入口就是各自的 apply(ctx)。
 # dsh.client 指向浏览器半 client.js（侧栏「DSH操作电脑」一页 + 图标旁的状态点）。
@@ -19,6 +19,8 @@
         shipAt: meaningful
         settleMs: 220
         desktop:
+          # user = 操作本机真实桌面（整屏截图 + SendInput）；isolated = 独立桌面。
+          mode: user
           captureWidth: 1280
           captureHeight: 800
     - id: dsh-deputy-browser

@@ -17,7 +17,8 @@
 
 param(
     [Parameter(Mandatory = $true)][string]$Op,
-    [string]$Name = 'deputy-default'
+    [string]$Name = 'deputy-default',
+    [ValidateSet('isolated', 'user')][string]$Mode = 'isolated'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +39,8 @@ public class Desk2 {
     // 关键：主线程（PowerShell 控制台）已经创建过窗口，SetThreadDesktop 会报 ERROR_BUSY(170)。
     // 所以在一条从未创建窗口的新线程上切桌面，再在该线程里做 GDI 捕获 / 注入输入。
     private static void OnDesktop(IntPtr desk, Action body) {
+        // desk 为 0 = 用户桌面模式：当前线程本来就在输入桌面上，不需要（也不能）再切换。
+        if (desk == IntPtr.Zero) { body(); return; }
         Exception err = null;
         Thread t = new Thread(delegate() {
             try {
@@ -248,6 +251,76 @@ public class Desk2 {
         return report;
     }
 
+    // ---- 用户桌面模式：整屏截图 + SendInput ----
+    // 用户桌面（输入桌面）由 DWM 合成，整屏 BitBlt 就是用户看到的画面；
+    // 输入必须走 SendInput：PostMessage 投给 Chromium 这类自绘输入的窗口会被丢弃。
+    // 进程必须声明 DPI 感知：否则 GetSystemMetrics 返回的是被 150% 缩放后的 1280x720，
+    // 截图形状和点击坐标都会跟真实屏幕对不上。
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    public static bool MakeDpiAware() { return SetProcessDPIAware(); }
+    public static int ScreenWidth() { return GetSystemMetrics(0); }
+    public static int ScreenHeight() { return GetSystemMetrics(1); }
+
+    private static INPUT MouseInput(int flag) {
+        INPUT input = new INPUT();
+        input.type = INPUT_MOUSE;
+        input.mi.dwFlags = flag;
+        return input;
+    }
+
+    private static INPUT UnicodeInput(char ch, bool up) {
+        INPUT input = new INPUT();
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = 0;
+        input.ki.wScan = (short)ch;
+        input.ki.dwFlags = KEYEVENTF_UNICODE | (up ? KEYEVENTF_KEYUP : 0);
+        return input;
+    }
+
+    public static void ClickUser(int x, int y, bool right, int clicks) {
+        OnDesktop(IntPtr.Zero, delegate() {
+            POINT p = new POINT(); p.X = x; p.Y = y;
+            IntPtr target = WindowFromPoint(p);
+            // 先把这个窗口提到前台，否则点击会落在用户当前的活动窗口上。
+            if (target != IntPtr.Zero) { SetForegroundWindow(target); Thread.Sleep(80); }
+            if (!SetCursorPos(x, y)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            Thread.Sleep(30);
+            int count = Math.Max(1, Math.Min(3, clicks));
+            for (int i = 0; i < count; i++) {
+                SendChecked(new INPUT[] { MouseInput(right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN) });
+                Thread.Sleep(30);
+                SendChecked(new INPUT[] { MouseInput(right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP) });
+                Thread.Sleep(80);
+            }
+            LastInputWindow = target;
+        });
+    }
+
+    public static void TypeUser(string text) {
+        OnDesktop(IntPtr.Zero, delegate() {
+            foreach (char ch in text ?? "") {
+                SendChecked(new INPUT[] { UnicodeInput(ch, false) });
+                SendChecked(new INPUT[] { UnicodeInput(ch, true) });
+                Thread.Sleep(8);
+            }
+        });
+    }
+
+    public static void KeyUser(string combo) {
+        OnDesktop(IntPtr.Zero, delegate() {
+            string[] parts = (combo ?? "").Split('+');
+            var keys = new System.Collections.Generic.List<ushort>();
+            foreach (string part in parts) keys.Add(KeyCode(part));
+            foreach (ushort key in keys) SendChecked(new INPUT[] { KeyInput(key, false) });
+            for (int i = keys.Count - 1; i >= 0; i--) SendChecked(new INPUT[] { KeyInput(keys[i], true) });
+        });
+    }
+
+    public static int LaunchUser(string exe, string args) {
+        // lpDesktop 传 null = 继承调用方所在桌面（用户桌面）。
+        return Launch(exe, args, null);
+    }
+
     public static void ClickOn(IntPtr desk, int x, int y, bool right, int clicks) { OnDesktop(desk, delegate() { Click(x, y, right, clicks); }); }
     public static void TypeOn(IntPtr desk, string text) { OnDesktop(desk, delegate() { TypeText(text); }); }
     public static void KeyOn(IntPtr desk, string combo) { OnDesktop(desk, delegate() { KeyCombo(combo); }); }
@@ -290,6 +363,7 @@ public class Desk2 {
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int cbSize);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
     [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
@@ -455,17 +529,30 @@ if ($Op -ne 'host') {
 }
 
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+# 必须在任何 DC/窗口被创建之前声明 DPI 感知，否则整屏尺寸与坐标都是缩放后的虚拟值。
+try { [Deputy.Desk2]::MakeDpiAware() | Out-Null } catch { }
 $script:out = [Console]::Out
 $handle = $null
 $launched = @()
+$isUser = ($Mode -eq 'user')
 
 try {
-    $handle = [Deputy.Desk2]::Create($Name)
-    # 在干净 STA 线程里验证附着；失败必须终止，绝不能让 UIA 静默落到主桌面。
-    [Deputy.Desk2]::Attach($handle)
-    $attached = $true
-    $attachErr = 0
-    Reply @{ id = 0; ok = $true; desktop = $Name; attached = $attached; attachErr = $attachErr; pid = $PID }
+    if ($isUser) {
+        # 用户桌面模式：不建新桌面，直接操作当前输入桌面（豆包 / UI-TARS 那种做法）。
+        # 好处：DWM 合成 → 整屏截图正常；输入桌面 → SendInput 生效。
+        # 代价：没有隔离，点击和打字会真的动用户的鼠标键盘。
+        $handle = [IntPtr]::Zero
+        $attached = $true
+        $attachErr = 0
+        Reply @{ id = 0; ok = $true; desktop = 'user'; mode = 'user'; attached = $true; attachErr = 0; pid = $PID }
+    } else {
+        $handle = [Deputy.Desk2]::Create($Name)
+        # 在干净 STA 线程里验证附着；失败必须终止，绝不能让 UIA 静默落到主桌面。
+        [Deputy.Desk2]::Attach($handle)
+        $attached = $true
+        $attachErr = 0
+        Reply @{ id = 0; ok = $true; desktop = $Name; mode = 'isolated'; attached = $attached; attachErr = $attachErr; pid = $PID }
+    }
 }
 catch {
     Reply @{ id = 0; ok = $false; error = $_.Exception.Message; code = 'ECREATE' }
@@ -482,14 +569,28 @@ try {
             switch ($req.op) {
                 'create' {
                     # 桌面在进程启动时已建好，这里只做幂等确认，兼容传输层的 create 握手。
-                    Reply @{ id = $req.id; ok = $true; desktop = $Name; attached = $attached; pid = $PID }
+                    Reply @{ id = $req.id; ok = $true; desktop = $Name; mode = $Mode; attached = $attached; pid = $PID }
                 }
                 'launch' {
-                    $pidOn = [Deputy.Desk2]::Launch($req.exe, [string]$req.args, $Name)
-                    $launched += $pidOn
-                    Reply @{ id = $req.id; ok = $true; pid = $pidOn }
+                    if ($isUser) {
+                        $pidOn = [Deputy.Desk2]::LaunchUser($req.exe, [string]$req.args)
+                    } else {
+                        $pidOn = [Deputy.Desk2]::Launch($req.exe, [string]$req.args, $Name)
+                    }
+                    # 用户桌面模式不登记 pid：finally 里绝不许杀掉用户自己的进程。
+                    if (-not $isUser) { $launched += $pidOn }
+                    Reply @{ id = $req.id; ok = $true; pid = $pidOn; mode = $Mode }
                 }
                 'capture' {
+                    if ($isUser) {
+                        # 用户桌面有 DWM 合成，整屏 BitBlt 就是用户看到的画面（含任务栏与所有窗口）。
+                        $sw = [Deputy.Desk2]::ScreenWidth()
+                        $sh = [Deputy.Desk2]::ScreenHeight()
+                        if ($sw -le 0 -or $sh -le 0) { throw '取不到屏幕尺寸' }
+                        $bytes = [Deputy.Desk2]::Capture([IntPtr]::Zero, $sw, $sh)
+                        Reply @{ id = $req.id; ok = $true; width = $sw; height = $sh; originX = 0; originY = 0; source = 'screen'; pid = 0; grayBase64 = [Convert]::ToBase64String($bytes) }
+                        continue
+                    }
                     # 隔离桌面没有 DWM 合成，整桌面 BitBlt 全黑；只抓窗口（PrintWindow），并且排除宿主自己的控制台。
                     $targetPid = 0
                     if ($launched.Count -gt 0) { $targetPid = [int]$launched[$launched.Count - 1] }
@@ -523,15 +624,22 @@ try {
                 }
                 'input' {
                     $in = $req.input
+                    $clicks = 1
+                    if ($null -ne $in.clicks) { $clicks = [Math]::Max(1, [Math]::Min(3, [int]$in.clicks)) }
                     if ($in.op -eq 'click') {
-                        $clicks = 1
-                        if ($null -ne $in.clicks) { $clicks = [Math]::Max(1, [Math]::Min(3, [int]$in.clicks)) }
-                        [Deputy.Desk2]::ClickOn($handle, [int]$in.x, [int]$in.y, ($in.button -eq 'right'), $clicks)
+                        if ($isUser) { [Deputy.Desk2]::ClickUser([int]$in.x, [int]$in.y, ($in.button -eq 'right'), $clicks) }
+                        else { [Deputy.Desk2]::ClickOn($handle, [int]$in.x, [int]$in.y, ($in.button -eq 'right'), $clicks) }
                     }
-                    elseif ($in.op -eq 'type') { [Deputy.Desk2]::TypeOn($handle, [string]$in.text) }
-                    elseif ($in.op -eq 'key') { [Deputy.Desk2]::KeyOn($handle, [string]$in.combo) }
+                    elseif ($in.op -eq 'type') {
+                        if ($isUser) { [Deputy.Desk2]::TypeUser([string]$in.text) }
+                        else { [Deputy.Desk2]::TypeOn($handle, [string]$in.text) }
+                    }
+                    elseif ($in.op -eq 'key') {
+                        if ($isUser) { [Deputy.Desk2]::KeyUser([string]$in.combo) }
+                        else { [Deputy.Desk2]::KeyOn($handle, [string]$in.combo) }
+                    }
                     else { throw "不支持的 input.op $($in.op)" }
-                    Reply @{ id = $req.id; ok = $true }
+                    Reply @{ id = $req.id; ok = $true; mode = $Mode }
                 }
                 'uia' {
                     # UIA 必须在附着到隔离桌面的干净 STA 线程里执行，不能使用 PowerShell 主线程。
@@ -551,6 +659,7 @@ try {
     }
 }
 finally {
+    # 用户桌面模式下 $launched 为空，且绝不能去 CloseDesktop(0)。
     foreach ($p in $launched) { try { Stop-Process -Id $p -Force -ErrorAction SilentlyContinue } catch { } }
-    if ($handle) { [Deputy.Desk2]::CloseDesktop($handle) | Out-Null }
+    if (-not $isUser -and $handle) { [Deputy.Desk2]::CloseDesktop($handle) | Out-Null }
 }
