@@ -2,6 +2,23 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.41
+
+### 隔离桌面里的点击与打字真正可用（真机）
+- **根因**：隔离桌面不是「输入桌面」，`SendInput` 注入的事件只会落到用户当前活动桌面，
+  实测被接受 `0/N`；`SetCursorPos` 先成功，于是报错显示成「操作成功完成」。
+- **修法**：宿主改为 `PostMessage` 直接投递给该桌面里的目标窗口 —— `WindowFromPoint` +
+  `ScreenToClient` 定位，`WM_MOUSEMOVE`/`WM_LBUTTONDOWN`/`WM_LBUTTONUP`（右键 `0x0204`/`0x0205`）点击，
+  `WM_CHAR` 逐字符打字，组合键改投 `WM_KEYDOWN`/`WM_KEYUP`（逆序释放）。
+- **工具返回值不再触发宿主校验**：`deputy_desktop` 的 `status`/`launch` 不再回 `null` ——
+  0.2.2 会用 `output.schema` 校验返回值，`pid`/`error` 给 `null` 会直接报
+  `invalid output: "value.pid" must be a number`。没值就整个字段省掉（子集不支持 nullable）。
+- **真机证据**：隔离桌面里启动记事本 → 点击正文 → 打字，窗口标题与正文都出现
+  `deputy desktop hello 123`（截图 `deputy-type-check.png`）。
+- 已知边界：靠 `GetKeyState` 判断修饰键的快捷键（部分浏览器）可能不认投递的按键。
+- 自检 50 → 51 项，新增「宿主脚本输入不走 `SendInput` 且保留 UTF-8 BOM」；
+  `check-plugin` 增加 BOM、`PostMessage`/`WindowFromPoint`/`ScreenToClient`/`WM_CHAR`/`GetGUIThreadInfo`
+  与「禁止回退 SendInput」断言。
 ## 1.3.40
 
 ### 监视窗完整等比显示与可点击修复

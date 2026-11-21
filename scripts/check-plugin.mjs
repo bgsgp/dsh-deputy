@@ -383,6 +383,28 @@ publishSrc.includes("execSync(`npm ")
   ? ok('publish-npm.mjs 用 shell 调 npm（Windows 可跑）')
   : bad('publish-npm.mjs 未用 execSync 调 npm（Windows 上会 spawn ENOENT）')
 
+// 8g. 宿主输入：隔离桌面不是输入桌面，SendInput 必然 0/N，必须走 PostMessage
+const ps1Path = 'scripts/windows-desktop.ps1'
+if (exists(ps1Path)) {
+  const raw = readFileSync(path.join(ROOT, ps1Path))
+  const bom = raw.length >= 3 && raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf
+  bom
+    ? ok('windows-desktop.ps1 带 UTF-8 BOM（无 BOM 会被 CP936 解码吞换行）')
+    : bad('windows-desktop.ps1 缺 UTF-8 BOM —— Windows PowerShell 会按 CP936 解码并报语法错误')
+  const ps1 = raw.toString('utf8')
+  for (const needle of ['PostMessage', 'WindowFromPoint', 'ScreenToClient', 'WM_CHAR', 'GetGUIThreadInfo']) {
+    ps1.includes(needle) ? ok('宿主输入用到 ' + needle) : bad('宿主输入缺少 ' + needle + '（隔离桌面里点不动/打不了字）')
+  }
+  ps1.includes('SendInput 注入的事件会落到用户主桌面')
+    ? ok('宿主注释写明了 SendInput 不能用（隔离桌面非输入桌面）')
+    : warn('宿主未注释说明 SendInput 的隔离桌面限制')
+  ps1.includes('SendChecked(events')
+    ? bad('点击/组合键仍在用 SendInput（SendChecked），隔离桌面里会失败')
+    : ok('点击/组合键已不再走 SendInput')
+} else {
+  bad('缺少 ' + ps1Path)
+}
+
 // 9. 依赖数量仍为 0（只用 Node 内置 + react 单例）
 Object.keys(pkg.dependencies ?? {}).length === 0 ? ok('运行时依赖 0 个') : warn('出现了 dependencies')
 

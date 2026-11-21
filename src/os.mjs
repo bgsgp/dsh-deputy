@@ -219,13 +219,17 @@ export function toolSpecs(deputy, session, options = {}) {
         text(`桌面 ${v?.state ?? 'unknown'}${v?.pid ? ` · pid ${v.pid}` : ''}${v?.error ? ` · ${v.error}` : ''}`),
       handler: async (args) => {
         switch (args.op) {
-          case 'status':
-            return {
-              state: session.state,
-              name: session.name,
-              pid: session.pid ?? null,
-              error: session.lastError?.message ?? null,
-            }
+          case 'status': {
+            // 0.2.2 宿主会用 output.schema 校验返回值：给了 pid/error 就必须是
+            // number/string，null 会直接报 invalid output（见 m02069 的实测）。
+            // schema 子集不支持 nullable，所以没值就整个字段省掉。
+            const value = { state: session.state }
+            if (session.name) value.name = session.name
+            if (typeof session.pid === 'number') value.pid = session.pid
+            const message = session.lastError?.message
+            if (message) value.error = message
+            return value
+          }
           case 'open':
             await session.ensureOpen()
             return { state: session.state, name: session.name }
@@ -233,7 +237,10 @@ export function toolSpecs(deputy, session, options = {}) {
             if (!args.exe) throw new Error('launch 需要 exe')
             await session.ensureOpen()
             const r = await session.startApp(args.exe, args.args ?? [])
-            return { state: session.state, ...r }
+            const value = { state: session.state }
+            if (typeof r?.pid === 'number') value.pid = r.pid
+            else if (typeof session.pid === 'number') value.pid = session.pid
+            return value
           }
           case 'tree': {
             await session.ensureOpen()

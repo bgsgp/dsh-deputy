@@ -263,6 +263,14 @@ public class Desk2 {
     public struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GUITHREADINFO {
+        public int cbSize, flags;
+        public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+        public RECT rcCaret;
+    }
+    [StructLayout(LayoutKind.Sequential)]
     public struct MOUSEINPUT { public int dx, dy, mouseData, dwFlags, time; public IntPtr dwExtraInfo; }
     [StructLayout(LayoutKind.Sequential)]
     public struct KEYBDINPUT { public short wVk, wScan; public int dwFlags, time; public IntPtr dwExtraInfo; }
@@ -282,6 +290,11 @@ public class Desk2 {
     [DllImport("user32.dll")] public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int cbSize);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
+    [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hwnd, ref POINT point);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO info);
+    public static IntPtr LastInputWindow = IntPtr.Zero;
     [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr hdc);
     [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int w, int h);
     [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
@@ -335,20 +348,37 @@ public class Desk2 {
                 "SendInput 只接受了 " + sent + "/" + inputs.Length + " 个输入事件");
     }
 
+    // 隔离桌面不是"输入桌面"，SendInput 注入的事件会落到用户主桌面（实测 0/N 被接受），
+    // 所以点击/输入一律用 PostMessage 直接投递给隔离桌面里的目标窗口。
     public static void Click(int x, int y, bool right, int clicks) {
-        if (!SetCursorPos(x, y)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        var events = new System.Collections.Generic.List<INPUT>();
+        POINT screen = new POINT(); screen.X = x; screen.Y = y;
+        IntPtr target = WindowFromPoint(screen);
+        if (target == IntPtr.Zero) throw new InvalidOperationException("该坐标上没有窗口可点击");
+        POINT client = screen;
+        if (!ScreenToClient(target, ref client))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        LastInputWindow = target;
+        uint down = right ? 0x0204u : 0x0201u;
+        uint up = right ? 0x0205u : 0x0202u;
+        IntPtr lp = (IntPtr)((client.Y << 16) | (client.X & 0xFFFF));
         int count = Math.Max(1, Math.Min(3, clicks));
         for (int i = 0; i < count; i++) {
-            INPUT down = new INPUT();
-            down.type = INPUT_MOUSE;
-            down.mi.dwFlags = right ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_LEFTDOWN;
-            INPUT up = new INPUT();
-            up.type = INPUT_MOUSE;
-            up.mi.dwFlags = right ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_LEFTUP;
-            events.Add(down); events.Add(up);
+            PostMessage(target, 0x0200u, IntPtr.Zero, lp);
+            PostMessage(target, down, (IntPtr)(right ? 2 : 1), lp);
+            PostMessage(target, up, IntPtr.Zero, lp);
+            System.Threading.Thread.Sleep(40);
         }
-        SendChecked(events.ToArray());
+    }
+
+    private static IntPtr FocusWindow() {
+        IntPtr target = LastInputWindow;
+        if (target == IntPtr.Zero) throw new InvalidOperationException("还没有点过任何窗口，先 click 再 type");
+        uint pid;
+        uint tid = GetWindowThreadProcessId(target, out pid);
+        GUITHREADINFO gi = new GUITHREADINFO();
+        gi.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+        if (GetGUIThreadInfo(tid, ref gi) && gi.hwndFocus != IntPtr.Zero) return gi.hwndFocus;
+        return target;
     }
 
     private static INPUT KeyInput(ushort vk, bool up) {
@@ -396,18 +426,17 @@ public class Desk2 {
             throw new ArgumentException("组合键不能为空");
         var keys = new System.Collections.Generic.List<ushort>();
         foreach (string part in parts) keys.Add(KeyCode(part));
-        var events = new System.Collections.Generic.List<INPUT>();
-        foreach (ushort key in keys) events.Add(KeyInput(key, false));
-        for (int i = keys.Count - 1; i >= 0; i--) events.Add(KeyInput(keys[i], true));
-        SendChecked(events.ToArray());
+        IntPtr focus = FocusWindow();
+        // 同样用 PostMessage；注意 GetKeyState 型快捷键（部分浏览器）可能不认投递的修饰键。
+        foreach (ushort key in keys) PostMessage(focus, 0x0100u, (IntPtr)key, (IntPtr)1);
+        for (int i = keys.Count - 1; i >= 0; i--) PostMessage(focus, 0x0101u, (IntPtr)keys[i], (IntPtr)(1 | (1 << 30) | (1 << 31)));
     }
 
     public static void TypeText(string text) {
+        IntPtr focus = FocusWindow();
         foreach (char ch in text ?? "") {
-            INPUT[] bi = new INPUT[2];
-            bi[0].type = INPUT_KEYBOARD; bi[0].ki.wScan = (short)ch; bi[0].ki.dwFlags = KEYEVENTF_UNICODE;
-            bi[1].type = INPUT_KEYBOARD; bi[1].ki.wScan = (short)ch; bi[1].ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-            SendChecked(bi);
+            PostMessage(focus, 0x0102u, (IntPtr)ch, (IntPtr)1);   // WM_CHAR
+            System.Threading.Thread.Sleep(5);
         }
     }
 }

@@ -62,7 +62,7 @@ DesktopSession.open()  ──► 宿主: CreateDesktopW + SetThreadDesktop
 startApp(exe)          ──► 宿主: CreateProcessW(lpDesktop="WinSta0\deputy-x")
 capture()              ──► 宿主: PrintWindow 逐窗口捕获该桌面画面
 tree()                 ──► 宿主: UIA RootElement（= 线程所在桌面）
-input(click/type)      ──► 宿主: SendInput
+input(click/type)      ──► 宿主: PostMessage(WM_*)
 close()                ──► 宿主退出 → 桌面销毁，不残留
 ```
 
@@ -94,7 +94,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 50 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / HTTP 面板
+node test/run-tests.mjs        # 51 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -161,7 +161,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `budget.mjs` 预算 | ✅ 实现 + 单测 | 三档降级 |
 | `runner.mjs` 闭环 | ✅ 实现 + 单测（注入式，无需 Windows） | 重试 / 熔断 |
 | `desktop.mjs` 虚拟桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭 |
-| `scripts/windows-desktop.ps1` | ✅ 真机验证（0.2.2-rc.5 宿主） | 常驻宿主：建桌面 / 启动 / 逐窗口 `PrintWindow` 捕获 / 取树；`SendInput` 仍待回归。已实测在隔离桌面打开 Edge 并拍到 B 站首页 |
+| `scripts/windows-desktop.ps1` | ✅ 真机验证（0.2.2-rc.5 宿主） | 常驻宿主：建桌面 / 启动 / 逐窗口 `PrintWindow` 捕获 / 取树 / `PostMessage` 点击与打字。已实测在隔离桌面打开 Edge 拍到 B 站首页，并在记事本里点击正文后打出 `deputy desktop hello 123`（截图可见） |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
 | `scripts/check-plugin.mjs` | ✅ 可用 | 按 DSH 0.2.2 插件 ABI 机检（清单 / 工具 / 图片 / icon） |
 | `scripts/publish-npm.mjs` | ✅ 可用 | 舞台打包 + 直接 npm publish（标准三段版本） |
@@ -172,9 +172,11 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），桌面自动化仍待真机回归 |
 | 浏览器组件（`src/browser/`） | 🟡 代码补全，待真机回归 | 1.3.39 已加入结构化等待、真实遮挡阻断、多标签、上传下载、截图附件、幂等和异常状态恢复；保持五工具 ABI。OOPIF iframe 仍是边界。本轮按用户要求未启动浏览器实测，详见 [docs/BROWSER.md](docs/BROWSER.md) |
 
-**已知未验证点**：x64 `INPUT` 40 字节对齐、`SendInput` 在非活动桌面的实际效果、
-UAC/安全桌面对隔离桌面的抢占。已解决：`SetThreadDesktop` 在 PowerShell 里必须放到
-"从未建过窗口"的后台 STA 线程；隔离桌面拍画面必须用逐窗口 `PrintWindow`（桌面级 BitBlt 全黑）。
+**已知未验证点**：UAC/安全桌面对隔离桌面的抢占、靠 `GetKeyState` 判断修饰键的快捷键
+（部分浏览器 `Ctrl+L` 之类不认投递的按键）。
+已解决（真机）：`SetThreadDesktop` 在 PowerShell 里必须放到"从未建过窗口"的后台 STA 线程；
+隔离桌面拍画面必须用逐窗口 `PrintWindow`（桌面级 BitBlt 全黑）；`SendInput` 在隔离桌面
+接受 0/N 个事件，点击/打字必须用 `PostMessage` 投递到目标窗口。
 真机第一步先看 `deputy_desktop { op: "open" }` 返回的 `attached` 是否为 true。
 
 ---

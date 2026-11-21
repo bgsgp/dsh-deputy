@@ -23,7 +23,7 @@ DesktopSession.open()  ────────▼ CreateDesktopW + SetThreadDes
 startApp(exe)          ────────► CreateProcessW(lpDesktop="WinSta0\deputy-x")  ← 目标程序
 capture()              ────────► 逐窗口 PrintWindow 捕获 ──┐
 tree()                 ────────► UIA RootElement 取树   ├─ 都在同一桌面对象里
-input(click/type)      ────────► SendInput             ──┘
+input(click/type)      ────────► PostMessage(WM_*)       ──┘
 close()                ────────► 宿主退出 → 桌面销毁
 ```
 
@@ -37,6 +37,7 @@ close()                ────────► 宿主退出 → 桌面销毁
 |---|---|---|
 | `SetThreadDesktop` 只能在线程**尚未创建任何窗口**前调用 | 中途切桌面一定失败 | 宿主进程启动时立即切，之后所有操作都在该桌面做 |
 | 非活动桌面不能用 `Windows.Graphics.Capture`；也没有 DWM 合成，桌面级 `BitBlt` 全黑 | 直接截桌面永远拿不到画面 | 逐窗口 `PrintWindow(hwnd, memDC, PW_RENDERFULLCONTENT=2)`：枚举该桌面可见窗口取最大者（可限定 pid），失败才回退桌面 BitBlt |
+| 隔离桌面不是"输入桌面"，`SendInput` 的事件只会投到用户当前桌面（实测被接受 0/N） | 鼠标键盘在隔离桌面里完全无效 | 点击/输入改为 `PostMessage` 直接投给该桌面里的目标窗口：`WindowFromPoint` 定窗口、`WM_LBUTTONDOWN/UP` 定位、`WM_CHAR` 打字、`WM_KEYDOWN/UP` 组合键 |
 | `CreateDesktopW` 用 `GENERIC_ALL` 需要管理员 | 普通权限直接被拒 | **显式报错**，绡不静默降级到主桌面 |
 
 第三条是刻意的：降级到主桌面意味着"用户正在用的界面被自动化乱动"，这比任务失败严重得多。
@@ -68,8 +69,8 @@ idle ──open()──► opened ──startApp()──► running ──close(
 还没对齐的：
 
 1. **无窗口 worker** —— 去掉 PowerShell 的隐藏控制台，UIA 树才干净。
-2. **毫秒级输入时序** —— 现在每次 `SendInput` 都是走 PS 的一轮调用，延迟在 10ms 量级；
-   高频拖动、IME 组合键会力不从心。
+2. **毫秒级输入时序** —— 现在每次点击/打字都是走 PS 的一轮调用，延迟在 10ms 量级；
+   `WM_CHAR` 逐字符投递，高频拖动、IME 组合输入会力不从心。
 3. **WGC 快路径** —— 前台/可见场景切换回 `Windows.Graphics.Capture`，画质与 CPU 都好得多；
    只在非活动桌面回落 BitBlt。
 4. **输入桌面切换（`OpenInputDesktop` 所有权）** —— 需要处理"隔离桌面里冒出 UAC / 安全桌面"
@@ -96,7 +97,7 @@ const deputy = createDeputy({
 
 感知、打分、拼图、ROI 校验全部不变——它们本来就不认识"桌面"是什么，这正是分层的价值。
 
-## 7. 宿主实现的四个坑（真机踩出来的）
+## 7. 宿主实现的五个坑（真机踩出来的）
 
 1. **`SetThreadDesktop` 要在无窗口线程里调**。PowerShell 主线程已经有控制台窗口，
    切换返回 `ERROR_BUSY(170)`，之后所有 EnumWindows / UIA / 捕获都落在用户桌面上
@@ -109,7 +110,15 @@ const deputy = createDeputy({
 3. **`CreateProcessW` 的 exe 要加引号**。命令行是整串字符串再解析的，
    `C:/Program Files (x86)/.../msedge.exe` 不加引号会被按空格拆开，
    浏览器把 `files`、`(x86)` 当网址打开（表现为 `DNS_PROBE_FINISHED_NXDOMAIN`）。
-4. **脚本得是 UTF-8 with BOM**。UTF-8 无 BOM 时 Windows PowerShell 按 CP936 解码，
+4. **点击/打字不能用 `SendInput`**。`SendInput` 注入到的是**当前输入桌面**，不是调用线程
+   所在桌面；隔离桌面里实测 `SendInput` 接受 0/N 个事件，`SetCursorPos` 还会先成功，
+   于是报错信息看着像"操作成功完成"。改法：`WindowFromPoint` + `ScreenToClient` 定目标窗口后
+   用 `PostMessage` 投 `WM_MOUSEMOVE/WM_LBUTTONDOWN/WM_LBUTTONUP`（右键 0x0204/0x0205）、
+   `WM_CHAR`（逐字符）、`WM_KEYDOWN/WM_KEYUP`（组合键，先后顺序与逆序释放）。
+   已知边界：靠 `GetKeyState` 判断修饰键的快捷键（部分浏览器 Ctrl+L 之类）可能不认投递的按键。
+   真机实测：隔离桌面里启动记事本 → 点击正文 → 打字 `deputy desktop hello 123`，
+   标题栏与正文都出现该文本，截图可见。
+5. **脚本得是 UTF-8 with BOM**。UTF-8 无 BOM 时 Windows PowerShell 按 CP936 解码，
    中文注释尾部的字节会吞掉换行，后面的 C# 成员被并进注释，报
    `类、结构或接口成员声明中的标记"="无效`。另外 `Add-Type` 不要同时给
    `-TypeDefinition` 和 `-Namespace`/`-Name`（参数集冲突，报 `AmbiguousParameterSet`）。
