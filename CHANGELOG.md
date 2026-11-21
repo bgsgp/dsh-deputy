@@ -2,6 +2,19 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.46
+
+### 默认桌面模式改为 `virtual`（任务视图里的临时虚拟桌面）
+- `config.desktop.mode` 默认值 `user` → `virtual`：动作用的是**另开的一块干净虚拟桌面**，
+  用户原来的窗口全部留在上一张桌面，不会被误点、也不会被我们开的程序堆满；关会话桌面即收回。
+  取 `mode` 的归一化改成"只认 `isolated`/`user`，其余一律 `virtual`"，配错也不会退回"直接动你的桌面"。
+- `cordis.patch.yml` 的 `dsh-deputy-os` 同步写 `mode: virtual`（注释改成"默认 virtual，可切 user/isolated"）。
+- 文档：README 头部、三种模式表、默认值说明与代价段全部改为 virtual 默认；`docs/DESKTOP.md` §1.1
+  改成"三种模式（默认 virtual）"，并写清为什么不默认 `user`、也不默认 `isolated`。
+- 行为不变：`user`/`isolated` 仍可显式配置；`virtual` 的关闭顺序、`VDESK_NOT_ACTIVE` 守卫、
+  `$vdLaunched` 只杀自己进程等约束与原实现一致。
+- **自检**：`node test/run-tests.mjs` = **55 项全部通过**；`node scripts/check-plugin.mjs` 全部通过。
+
 ## 1.3.45
 
 ### 对齐豆包那套闭环：应用白名单精确启动 + 布局变化后强制重截

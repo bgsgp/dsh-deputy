@@ -412,9 +412,9 @@ if (exists(ps1Path)) {
     ? ok('宿主注明关闭虚拟桌面的顺序（先切回原桌面再 F4 会删掉用户桌面）')
     : warn('宿主未说明 virtual 模式的关闭顺序')
   const osSrc = exists('src/os.mjs') ? readFileSync(path.join(ROOT, 'src/os.mjs'), 'utf8') : ''
-  osSrc.includes("=== 'virtual'")
-    ? ok('os 组件允许把 desktop.mode 配成 virtual')
-    : bad('os 组件不认 virtual 模式（配了也只会退回 user）')
+  osSrc.includes("mode: 'virtual'") && osSrc.includes("? d.mode : 'virtual'")
+    ? ok('os 组件默认 virtual，且只认 isolated/user 两个显式值')
+    : bad('os 组件的默认模式不是 virtual（配错会退回直接动用户桌面）')
   // 应用白名单：只能从开始菜单清单按精确名称启动（豆包那套 ⑤）。
   for (const needle of ['Get-StartApps', "'launch-app'", 'APP_NOT_FOUND', 'APP_NOT_LAUNCHABLE', 'APP_TARGET_MISSING', 'Start Menu']) {
     ps1.includes(needle) ? ok('宿主应用白名单用到 ' + needle) : bad('宿主缺少 ' + needle + '（启动程序没有白名单约束）')

@@ -1,6 +1,6 @@
 # dsh-deputy
 
-> DSH 的桌面副官：**变化即证据**，默认在你**自己的真实桌面**上动手（也可切回隐藏的隔离桌面）。
+> DSH 的桌面副官：**变化即证据**，默认在**任务视图里另开的一块临时虚拟桌面**上动手（用完收回，不碰你原来的窗口）。
 > 桌面被当成稀疏信号源而不是截图流——本地打分，跨档才推一张 4×4 联系表；
 > 动作走 UIA 语义优先，每一步只校验它本该动的那块区域。
 
@@ -48,18 +48,18 @@ dsh plugin --profile web add dsh-deputy
 | **变化即证据** | 帧的价值 = 相对上一帧变了多少；0..1 分数分四档（still/minor/meaningful/major） |
 | **语义优先** | UIA `InvokePattern`/`ValuePattern` 打头，键鼠是兜底不是首选 |
 | **ROI 校验** | 动作后只比对它该影响的区域，并额外检测"别处有没有被带脏" |
-| **三种桌面模式** | `user`（默认）：整屏 + `SendInput`，和你手动操作是同一张桌面；`virtual`：任务视图里新建一块临时桌面，彩色整屏 + `SendInput`，关会话即收回；`isolated`：常驻宿主握独立 Desktop，`PrintWindow` + `PostMessage`，不抢焦点 |
+| **三种桌面模式** | `virtual`（默认）：任务视图里新建一块临时桌面，彩色整屏 + `SendInput`，关会话即收回；`user`：整屏 + `SendInput`，和你手动操作是同一张桌面；`isolated`：常驻宿主握独立 Desktop，`PrintWindow` + `PostMessage`，不抢焦点 |
 
 ---
 
 ## 三种桌面模式
 
-`config.desktop.mode` 决定动作落在哪张桌面上（默认 `user`）：
+`config.desktop.mode` 决定动作落在哪张桌面上（默认 `virtual`）：
 
 | 模式 | 桌面 | 你看到的 | 采帧 | 点击 / 打字 | 会抢你的鼠标吗 |
 |---|---|---|---|---|---|
-| `user`（默认） | 你自己的真实桌面 | 整屏（真机 1920×1080，含任务栏、其它窗口） | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：点击前把目标窗口提到前台 |
-| `virtual` | 任务视图里**新建的临时桌面**（`Win+Ctrl+D`） | 整屏彩色、完整，但只有壁纸和图标——你原来那些窗口都留在上一张桌面上 | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：操作期间你的屏幕就在这张新桌面上 |
+| `user` | 你自己的真实桌面 | 整屏（真机 1920×1080，含任务栏、其它窗口） | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：点击前把目标窗口提到前台 |
+| `virtual`（默认） | 任务视图里**新建的临时桌面**（`Win+Ctrl+D`） | 整屏彩色、完整，但只有壁纸和图标——你原来那些窗口都留在上一张桌面上 | 桌面级 `BitBlt` | `SendInput` 合成事件 | 会：操作期间你的屏幕就在这张新桌面上 |
 | `isolated` | 宿主 `CreateDesktopW` 新建的隐藏桌面 | 该桌面里的窗口（不是整屏） | 逐窗口 `PrintWindow`（无 DWM，桌面级 BitBlt 全黑） | `PostMessage` 直投窗口 | 不会 |
 
 `virtual` 就是「豆包虚拟桌面」那套观感：真机实测开出来的新桌面是完整彩色壁纸 + 图标 + 任务栏，
@@ -71,12 +71,12 @@ dsh plugin --profile web add dsh-deputy
 另外 DSH 面板窗口本身在你的原桌面上（`MoveWindowToDesktop` 对别人的窗口返回 `E_ACCESSDENIED`），
 所以操作期间你看不到侧栏那一页，只能看到被操作的新桌面；中途切走桌面时输入会被拒绝并回 `VDESK_NOT_ACTIVE`。
 
-为什么默认是 `user`：豆包那类「电脑操作」就是**在你当前会话里**整屏截图 + 注入合成键盘鼠标事件。
+为什么默认是 `virtual`：这样自动化跑的是一块**干净的新桌面**（只有壁纸、图标、任务栏），你原来的窗口全部留在上一张桌面，不会被误点、也不会被我们开的程序堆满；关会话桌面就收回。它之所以必须选虚拟桌面而不是隐藏桌面：豆包那类「电脑操作」= **真实输入桌面**上整屏截图 + 注入合成键盘鼠标事件。
 而 `CreateDesktop` 隐藏桌面拿不到合成画面（只能逐窗口抓，所以看起来"只有左上角"），它不是输入桌面、
 `SendInput` 实测接受 0/N 个事件，Chromium 这类自绘输入的窗口还会丢 `PostMessage` —— 表现就是"点不动"。
 
-代价也说清楚：`user` 模式下自动化**真的占用鼠标键盘**，跑任务时不要抢鼠标；需要"不打断你"时把
-`mode` 切回 `isolated`（能力受限，但完全不碰你的桌面）。
+代价也说清楚：`virtual` 模式操作期间屏幕会切到那块临时桌面，鼠标键盘被合成事件占用（你自己的窗口都留在上一张桌面，不会被动到），跑任务时不要抢鼠标；需要"不打断你"时把
+`mode` 切回 `isolated`（能力受限，但完全不碰你的桌面）；只跑一次、不想换桌面就用 `user`。
 
 ## 对照豆包那套「截图 → 点击」闭环
 
@@ -256,7 +256,7 @@ src/
   uia-bridge.mjs  一次性 PowerShell UIA 后端桥
   status.mjs      两组件共享的状态总线（合成侧栏那个状态点）
   registry.mjs    toParameters / registerTools（0.2.x 工具注册的公共层）
-  os.mjs          组件 dsh-deputy/os：桌面会话（默认真实桌面）+ 4 个 deputy_* 工具
+  os.mjs          组件 dsh-deputy/os：桌面会话（默认虚拟桌面）+ 4 个 deputy_* 工具
   browser.mjs     组件 dsh-deputy/browser：浏览器 daemon + 5 个 browser_* 工具
   browser/        launch / cdp / daemon / snapshot / act / wait / tools / cookies / errors
   index.mjs       兼容入口：只 `export * from './os.mjs'`
