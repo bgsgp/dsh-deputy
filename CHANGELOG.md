@@ -1,6 +1,59 @@
 # CHANGELOG
 
-版本号规则：`主版本.本版本.本版本提交数.总提交数`。当前版本见 `package.json`。
+版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
+
+## 1.2.31
+
+### 对齐 DSH 0.2.2 的插件 ABI
+- 版本号从四段 `1.2.0.31` 改为标准三段 semver `1.2.31`：pnpm/npm 本地 link 安装同样校验版本，
+  四段会直接 `ERR_PNPM_BAD_PACKAGE_JSON: Invalid version`，导致装不进真实 profile。
+- `package.json.repository` 改为 SSH（`git+ssh://git@github.com/bgsgp/dsh-deputy.git`），git remote 本来就是 SSH。
+- 清单迁移：删除 `dsh.plugin.json`（0.2.x 已不读取），bundle / client / icon / `engines.dsh`
+  全部写进 `package.json` 的 `dsh` 字段；新增 `assets/icon.svg`。
+- `engines.dsh = ">=0.2.2-rc.1 <0.2.3-0"`、`engines.node = ">=22.12.0"`；
+  peer 从 0.1.x 的 `dsh-client-runtime` / `dsh-client-ui-layout` 换成 `@deepseek-ai/cordis` + `@deepseek-ai/dsh`。
+- `dsh.client.inject` 改为 `@deepseek-ai/dsh-client-ui-renderer`（`slots` 服务提供方）。
+- 图片出口按新契约重写：`deputy_sheet` 调 `ctx.attachments.saveImage()` 拿 `ImageAttachmentRef`，
+  `render()` 返回 `{ type: 'image', attachment }` content block；不再在 `apply()` 里偷推附件
+  （`attachments.add` 在 0.2.x 已不存在）。
+- 工具注册去掉 0.1.x 的 `define(name, desc, schema, handler)` 回退，只走 `tools.register(defineTool(...))`；
+  `deputy_sense` 标记 `isConcurrencySafe`，其余桌面类工具保持独占。
+- `inject` 去掉未使用的 `sessionController`（其 `prompt()` 是 gateway 远程 API，不适合插件自推）。
+- `check-plugin.mjs` 重写为 0.2.2 机检：清单字段、`engines.dsh`、内联 required、
+  工具 `output.schema/render`、`isConcurrencySafe`、`saveImage` + image block、icon 尺寸。
+- 自检 24 项 → **29 项**，新增附件图片出口、attachments 缺失降级、0.2.x 注册签名、schema 形态四组断言，
+  以及用 stub `window.__ModuleLoader__` 真加载 `client.js` 校验 `sidebar.panellist` + `main` 注册。
+
+### 真机装载暴露的三处 ABI 修正（0.2.2-rc.5）
+- **output.schema 必须用标准 JSON Schema**：`required` 是对象上的字符串数组，
+  不能像参数表那样内联成字段上的 `required: true`。真实注册会抛
+  `JsonSchemaError: unsupported JSON schema: schema.properties.ok.required is not supported on type "boolean"`，
+  整个插件入口不激活。四个工具的 output 全部改写，`check-plugin.mjs` 增加子集校验。
+- **parameters 的 object 字段必须显式 `additionalProperties`**：author 参数表编译时抛
+  `parameters.payload.additionalProperties must be explicitly true or false`，
+  不是等到工具调用才报。已补 `deputy_act.payload`。
+- **清理走 `ctx.effect`**：Cordis 4 的 ctx 是严格 getter，读未注入的 `ctx.onDispose`
+  直接抛 `cannot get property "onDispose" without inject`；改为 `ctx.effect(() => () => ...)`。
+- 以上三条都用真实 DSH 运行时验证：同一份 `@deepseek-ai/dsh-tools` 的
+  `validateArgs` / `assertSupportedJsonSchema` 跑过 4 个工具；测试 profile 冷启动
+  `dsh --profile deputy-live` 不再出现 `1 entry did not activate`。
+
+### 界面入口：从浮窗胶囊改为侧栏「DSH操作电脑」一页
+- 用户要的是跟「新建 / 搜索 / 自定义 / QQ机器人 / 定时任务 / 上下文洞察 / 主题 / 免费搜索」
+  并列的常驻项，不是左下角 `shell.overlay` 浮窗，所以挂载点整体换掉。
+- `client.js` 重写：`ctx.slots.inject('sidebar.panellist')` 注册 `{ id: 'dsh-deputy-desktop',
+  order: 40, label: 'DSH操作电脑' }` + 显示器/指针图标（收 `{ size, active }`）；
+  `ctx.slots.inject('main')` 注册同 `key` 的整页组件。侧栏点击由 ui-sidebar 自己调
+  `ctx.layout.selectPanel(id)`，插件不碰 layout。
+- 页面改成整页布局（`.ddp-*`）：标题栏（状态 / 桌面名 / 打开 / 刷新 / 收起）、
+  中央画面（`object-fit: contain`，点画面发归一化坐标 `POST /api/input`）、
+  底部尺寸 / pid / 安全提示。组件卸载即停轮询，切页不空转。
+- 删掉旧的 `ViewerWindow` / `Toggle` 浮窗体与 `.ddp-pill/.ddp-win` 样式。
+- `dsh.client.inject` 补 `@deepseek-ai/dsh-client-ui-sidebar`（`sidebar.panellist` / `main`
+  两个座位的声明方）；`ui-renderer` 保留（`slots` 服务）。
+- `check-plugin.mjs` 的客户端段重写：断言注册 `sidebar.panellist` + `main`、侧栏名是
+  「DSH操作电脑」、且**不允许**再出现 `shell.overlay`（防回退）。
+- docs/VIEWER.md 整节改写（座位契约表、点行如何切页、防误注册 `sidebar`）。
 
 ## 1.1.2.30
 

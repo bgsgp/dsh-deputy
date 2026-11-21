@@ -1,9 +1,14 @@
-// DSH 插件入口
-// 工具声明按 DSH tools 注册表的真实契约写（对照 @deepseek-ai/dsh-tool-present）：
-//   register({ name, description, parameters, output: { schema, render }, execute })
+// DSH 插件入口（DSH 0.2.2 插件 ABI）
+//
+// 工具契约（对照 @deepseek-ai/dsh-tools 的 defineTool / ctx.tools.register）：
+//   register({ name, description, parameters, output: { schema, render }, execute, isConcurrencySafe? })
 //  - parameters 是「每字段内联 required」的描述式 schema，不是 JSON Schema 的 required 数组；
 //  - output 是必填项，缺失会被注册表判为异常：
-//    `tool "xxx" must declare output (schema, render, presentationMeta?)`。
+//    `tool "xxx" must declare output (schema, render, presentationMeta?)`；
+//  - 图片走 content block：render 返回 [{ type: 'text', ... }, { type: 'image', attachment }]，
+//    attachment 必须是 ctx.attachments.saveImage() 返回的 ImageAttachmentRef
+//    （0.2.x 只有 saveImage/saveFile，旧的 attachments.add 已不存在）；
+//  - 插件清单只在 package.json 的 dsh 字段里声明，dsh.plugin.json 在 0.2.x 已不再读取。
 import { createDeputy } from './runner.mjs'
 import { packSheet } from './sheet.mjs'
 import { Budget } from './budget.mjs'
@@ -12,7 +17,7 @@ import { createViewer, DEFAULT_VIEW_PORT } from './viewer.mjs'
 import * as A from './action.mjs'
 
 export const name = 'dsh-deputy'
-export const inject = ['sessionController', 'tools', 'attachments']
+export const inject = ['tools', 'attachments']
 
 export const config = {
   shipAt: 'meaningful',
@@ -61,12 +66,35 @@ export function toParameters(inputSchema = {}) {
 
 const text = (s) => [{ type: 'text', text: s }]
 
-/** 描述给模型的 4 个工具：看、做、拼图、桌面会话 */
-export function toolSpecs(deputy, session) {
+/**
+ * 工具结果里的图片描述。字段与 @deepseek-ai/dsh-attachment 的 ImageAttachmentRef 一致：
+ * render() 直接把 execute 返回的这份元数据包成 { type: 'image', attachment }。
+ */
+const imageSchema = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    attachmentId: { type: 'string' },
+    mediaType: { type: 'string' },
+    bytes: { type: 'number' },
+    width: { type: 'number' },
+    height: { type: 'number' },
+    name: { type: 'string' },
+    originalDimensions: { type: 'object' },
+  },
+}
+
+/**
+ * 描述给模型的 4 个工具：看、做、拼图、桌面会话。
+ * options.saveImage 由 apply() 注入（ctx.attachments.saveImage），缺省时拼图只回文本。
+ */
+export function toolSpecs(deputy, session, options = {}) {
   return [
     {
       name: 'deputy_sense',
       description: '采样一帧隔离桌面，返回变化分数与档位（still/minor/meaningful/major）。低档不必看图。',
+      // 只读采样，可以与别的工具并发（注册表 0.2.x 新增的 isConcurrencySafe）。
+      concurrencySafe: true,
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       outputSchema: {
         type: 'object',
@@ -94,7 +122,9 @@ export function toolSpecs(deputy, session) {
         type: 'object',
         properties: {
           kind: { type: 'string', enum: ['uia', 'input', 'shell', 'wait'] },
-          payload: { type: 'object' },
+          // author 参数表里 object 必须显式声明 additionalProperties（真实 dsh-tools 会抛
+          // "parameters.payload.additionalProperties must be explicitly true or false"）
+          payload: { type: 'object', additionalProperties: true },
           expect: { type: 'number', description: 'ROI 内期望的最小变化量' },
         },
         required: ['kind', 'payload'],
@@ -102,8 +132,11 @@ export function toolSpecs(deputy, session) {
       outputSchema: {
         type: 'object',
         additionalProperties: true,
+        // output.schema 必须是标准 JSON Schema：required 是数组，不能内联到字段上
+        // （内联写法只属于 parameters 的字段表，0.2.2 的 output 校验器会直接拒绝）。
+        required: ['ok'],
         properties: {
-          ok: { type: 'boolean', required: true },
+          ok: { type: 'boolean' },
           verdict: { type: 'string' },
           retries: { type: 'number' },
         },
@@ -113,7 +146,7 @@ export function toolSpecs(deputy, session) {
     },
     {
       name: 'deputy_sheet',
-      description: '把缓冲里"值得看"的帧压成 4×4 联系表推送进会话（一次只花一张图的钱）。',
+      description: '把缓冲里"值得看"的帧压成 4×4 联系表，作为 image 内容块返回给会话（一次只花一张图的钱）。',
       inputSchema: {
         type: 'object',
         properties: { reason: { type: 'string', description: '为什么要看这几帧' } },
@@ -122,24 +155,42 @@ export function toolSpecs(deputy, session) {
       outputSchema: {
         type: 'object',
         additionalProperties: true,
+        required: ['frames'],
         properties: {
-          frames: { type: 'number', required: true },
+          frames: { type: 'number' },
           budget: { type: 'object' },
           deduped: { type: 'boolean' },
           dropped: { type: 'string' },
+          image: imageSchema,
         },
       },
       render: (_args, v) => {
         if (v?.dropped) return text(`拼图未推送（${v.dropped}）`)
         if (!v?.frames) return text('没有值得推的帧')
         const level = v.budget?.degradation?.level ?? 'normal'
-        return text(`推送 ${v.frames} 帧联系表（预算 ${level}${v.deduped ? '，内容重复未重复上屏' : ''}）`)
+        const blocks = text(`推送 ${v.frames} 帧联系表（预算 ${level}${v.deduped ? '，内容重复未重复上屏' : ''}）`)
+        // 0.2.x 的图片不是附件"顺手一推"，而是工具结果里的 image block：模型同一步就能看到。
+        if (v.image?.attachmentId) blocks.push({ type: 'image', attachment: v.image })
+        return blocks
       },
       handler: async (args) => {
         const ev = await deputy.flush(args.reason)
         if (!ev) return { frames: 0 }
         if (ev.dropped) return { frames: 0, dropped: ev.dropped }
-        return { frames: ev.frames.length, budget: ev.budget, deduped: ev.deduped }
+        const value = { frames: ev.frames.length, budget: ev.budget, deduped: ev.deduped }
+        if (typeof options.saveImage === 'function') {
+          try {
+            const ref = await options.saveImage({
+              data: ev.png,
+              mediaType: 'image/png',
+              name: `deputy-sheet-${Date.now()}.png`,
+            })
+            if (ref) value.image = ref
+          } catch (e) {
+            options.log?.(`[dsh-deputy] 拼图附件保存失败：${e.message}`)
+          }
+        }
+        return value
       },
     },
     {
@@ -158,8 +209,9 @@ export function toolSpecs(deputy, session) {
       outputSchema: {
         type: 'object',
         additionalProperties: true,
+        required: ['state'],
         properties: {
-          state: { type: 'string', required: true },
+          state: { type: 'string' },
           name: { type: 'string' },
           pid: { type: 'number' },
           error: { type: 'string' },
@@ -202,13 +254,18 @@ export function toolSpecs(deputy, session) {
 }
 
 /**
- * 注册工具。优先走真实注册表签名（含 output）；
- * 老宿主只认 define(name, desc, schema, handler) 时退回去，但不静默——会在日志里说明。
+ * 注册工具。DSH 0.2.x 只认 ctx.tools.register(defineTool(...)) 这一种签名，
+ * 缺失 output 会直接抛错，所以这里不再保留 0.1.x 的 define(name, desc, schema, handler) 回退。
+ * 没有 tools 服务时把 spec 交回去，调用方可提示改用 MCP 形态。
  */
 export function registerTools(ctx, specs, log = () => {}) {
-  const box = ctx.tools ?? {}
+  const box = ctx?.tools
   const sink = []
   for (const spec of specs) {
+    if (typeof box?.register !== 'function') {
+      sink.push(spec)
+      continue
+    }
     const def = {
       name: spec.name,
       description: spec.description,
@@ -216,35 +273,29 @@ export function registerTools(ctx, specs, log = () => {}) {
       output: { schema: spec.outputSchema, render: spec.render },
       execute: (args, exec) => spec.handler(args, exec),
     }
-    if (typeof box.register === 'function') {
-      box.register(def)
-    } else if (typeof box.define === 'function') {
-      box.define(spec.name, spec.description, spec.inputSchema, spec.handler)
-      log(`[dsh-deputy] tools 只有 define()，${spec.name} 未声明 output（新宿主会判异常）`)
-    } else {
-      sink.push(spec)
-    }
+    if (spec.concurrencySafe === true) def.isConcurrencySafe = () => true
+    box.register(def)
   }
+  if (sink.length) log(`[dsh-deputy] 没有可用的 tools.register，${sink.length} 个工具未挂载；可用 mcp/server.mjs 以 MCP 形态暴露`)
   return sink
 }
 
 export function apply(ctx = {}) {
   const session = ensureSession(config)
+  // 图片不再由 apply() 偷推：deputy_sheet 的返回值自带 image block，
+  // 由 render() 交给会话，模型在同一步就能看到（0.2.x 附件契约）。
   const deputy = createDeputy({
     sensor: sessionSensor(session),
     actuator: sessionActuator(session),
     budget: new Budget(config.budget),
     policy: config,
-    onEvidence: async (ev) => {
-      if (ctx.attachments?.add) {
-        await ctx.attachments.add({ name: `deputy-sheet-${Date.now()}.png`, mime: 'image/png', data: ev.png })
-      }
-    },
   })
   state.deputy = deputy
 
   const log = (m) => ctx.logger?.warn?.(m)
-  const unregistered = registerTools(ctx, toolSpecs(deputy, session), log)
+  const saveImage = ctx.attachments?.saveImage?.bind(ctx.attachments)
+  if (!saveImage) log('[dsh-deputy] attachments.saveImage 不可用，deputy_sheet 只回文本')
+  const unregistered = registerTools(ctx, toolSpecs(deputy, session, { saveImage, log }), log)
   if (unregistered.length) {
     log(`[dsh-deputy] 未找到 tools 注册接口，${unregistered.length} 个工具未挂载；可用 mcp/server.mjs 以 MCP 形态暴露`)
   }
@@ -262,8 +313,10 @@ export function apply(ctx = {}) {
       .catch((e) => ctx.logger?.warn?.(`[dsh-deputy] 面板端点启动失败：${e.message}（工具不受影响）`))
   }
 
-  if (typeof ctx.onDispose === 'function') {
-    ctx.onDispose(async () => {
+  // Cordis 4 的 ctx 是严格 getter：读未注入的服务（如旧的 ctx.onDispose）会直接抛
+  // "cannot get property ... without inject"。清理统一走核心的 ctx.effect(disposer)。
+  ctx.effect(() => () => {
+    const closing = (async () => {
       try {
         await state.viewer?.stop?.()
       } catch {
@@ -271,8 +324,9 @@ export function apply(ctx = {}) {
       }
       state.viewer = null
       await session.close().catch(() => {})
-    })
-  }
+    })()
+    return () => void closing
+  })
 
   return { deputy, session, viewer: state.viewer, packSheet }
 }

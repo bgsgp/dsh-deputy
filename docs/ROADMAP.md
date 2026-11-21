@@ -17,7 +17,7 @@
 - [x] 采帧与动作全部落在隔离桌面
 - [x] 权限不足显式报错，不降级主桌面
 ### 插件化
-- [x] `dsh.plugin.json` 完整声明（entry / provides / permissions / lifecycle）
+- [x] 插件清单迁到 `package.json` 的 `dsh` 字段（bundle / client / icon / engines.dsh）
 - [x] 4 个工具：`deputy_sense / deputy_act / deputy_sheet / deputy_desktop`
 - [x] `check-plugin.mjs` 注册一致性机检
 - [x] MCP stdio 形态（含合成帧模式）

@@ -1,5 +1,5 @@
 /**
- * dsh-deputy 浏览器半：把虚拟桌面做成一个「能看、能点」的浮窗。
+ * dsh-deputy 浏览器半：把隔离桌面做成 DSH「应用」侧栏里的一页。
  *
  * 契约（对齐 @deepseek-ai/dsh-client-modules 的 lazy-CJS factory）：
  *  - 本脚本被执行时只做一件事：window.__ModuleLoader__.load({ id, factory })。
@@ -8,7 +8,12 @@
  *    所以这里只 require("react")。
  *  - 导出面是 cordis 客户端插件：apply(ctx) + inject（等待的服务名）。
  *
- * 挂载点选 shell.overlay（整帧浮层，pointer-events 默认穿透，正是"常驻窗口"该待的地方）。
+ * 挂载点（0.2.2 契约，见 @deepseek-ai/dsh-client-ui-sidebar/src/client/contract/slots.ts）：
+ *  - sidebar.panellist：list 槽，每个 id 对应 main 里同 key 的一页；
+ *    注册项 = { name, id, order, label } + 图标组件，图标收 { size, active }。
+ *    侧栏自己渲染行、管选中和 More 菜单，插件只提供 id/顺序/文字/图标。
+ *  - main：keyed 槽，注册项 = { name, key } + 页面组件；key 必须等于侧栏 id。
+ *    点侧栏行 → ctx.layout.selectPanel(id) → 中央区切到这一页（本插件不直接调 layout）。
  * 数据面走宿主起的 127.0.0.1:17872，见 src/viewer.mjs。
  */
 window.__ModuleLoader__.load({
@@ -22,32 +27,34 @@ window.__ModuleLoader__.load({
     const { useState, useEffect, useRef, useCallback } = React
     const h = React.createElement
 
+    /** 侧栏 id 与 main 页 key 共用的唯一标识。 */
+    const PANEL_ID = 'dsh-deputy-desktop'
+    /** 侧栏行文字；也是页面标题。 */
+    const PANEL_LABEL = 'DSH操作电脑'
+
     const CSS = `
-.ddn-toggle{position:absolute;left:10px;bottom:10px;pointer-events:auto;z-index:22;display:flex;align-items:center;gap:6px;
-  padding:6px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:999px;cursor:pointer;font:inherit;
-  background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);box-shadow:0 2px 10px rgba(0,0,0,.18)}
-.ddn-toggle:hover{border-color:var(--dsw-alias-brand-primary)}
-.ddn-dot{width:7px;height:7px;border-radius:50%;background:var(--dsw-alias-label-secondary)}
-.ddn-dot[data-live="1"]{background:var(--dsw-alias-state-success-primary)}
-.ddn-win{position:absolute;left:24px;bottom:56px;pointer-events:auto;z-index:23;display:flex;flex-direction:column;
-  min-width:360px;min-height:260px;width:640px;height:420px;resize:both;overflow:hidden;
-  border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-1);
-  box-shadow:0 8px 32px rgba(0,0,0,.3);color:var(--dsw-alias-label-primary);font-size:12px}
-.ddn-head{flex:none;display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:move;user-select:none;
+.ddp-page{display:flex;flex-direction:column;height:100%;min-height:0;font-size:13px;
+  background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
+.ddp-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 14px;
   border-bottom:1px solid var(--dsw-alias-border-l1)}
-.ddn-title{font-weight:600;font-size:13px}
-.ddn-spacer{flex:1}
-.ddn-btn{padding:3px 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:6px;cursor:pointer;
+.ddp-title{font-weight:600;font-size:14px}
+.ddp-spacer{flex:1}
+.ddp-tag{padding:1px 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);
+  font-size:11px;opacity:.9}
+.ddp-tag[data-live="1"]{color:var(--dsw-alias-state-success-primary)}
+.ddp-btn{padding:4px 10px;border:1px solid var(--dsw-alias-border-l2);border-radius:7px;cursor:pointer;
   background:var(--dsw-alias-bg-layer-2);color:inherit;font:inherit}
-.ddn-btn:hover{border-color:var(--dsw-alias-brand-primary)}
-.ddn-btn:disabled{opacity:.5;cursor:wait}
-.ddn-stage{flex:1;position:relative;display:flex;align-items:center;justify-content:center;
-  overflow:hidden;background:var(--dsw-alias-bg-layer-2)}
-.ddn-img{max-width:100%;max-height:100%;image-rendering:pixelated;cursor:crosshair}
-.ddn-empty{opacity:.75;text-align:center;padding:16px;line-height:1.6}
-.ddn-foot{flex:none;display:flex;align-items:center;gap:8px;padding:6px 10px;
+.ddp-btn:hover{border-color:var(--dsw-alias-brand-primary)}
+.ddp-btn:disabled{opacity:.5;cursor:wait}
+.ddp-btn[data-primary="1"]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+.ddp-stage{flex:1;min-height:0;position:relative;display:flex;align-items:center;justify-content:center;
+  overflow:auto;background:var(--dsw-alias-bg-layer-2)}
+.ddp-img{max-width:100%;max-height:100%;image-rendering:pixelated;cursor:crosshair;
+  box-shadow:0 6px 24px rgba(0,0,0,.28)}
+.ddp-empty{max-width:520px;padding:24px;line-height:1.9;text-align:center;opacity:.85}
+.ddp-empty b{font-size:15px;display:block;margin-bottom:6px;opacity:1}
+.ddp-foot{flex:none;display:flex;align-items:center;gap:10px;padding:7px 14px;
   border-top:1px solid var(--dsw-alias-border-l1);font-size:11px;opacity:.85}
-.ddn-tag{padding:1px 6px;border-radius:4px;background:var(--dsw-alias-bg-layer-2)}
 `
 
     const CSS_ID = 'dsh-deputy/viewer.css'
@@ -68,15 +75,43 @@ window.__ModuleLoader__.load({
       return res.json()
     }
 
-    function ViewerWindow(props) {
-      const { onClose, onState } = props
+    const STATE_TEXT = {
+      idle: '未打开',
+      opened: '已打开',
+      running: '运行中',
+      closed: '已收起',
+    }
+
+    /**
+     * 侧栏图标：显示器 + 指针。收 { size, active }，用 currentColor 跟随主题。
+     * @param {{size?: number, active?: boolean}} props
+     */
+    function DeputyIcon(props) {
+      const size = props && props.size ? props.size : 18
+      const active = Boolean(props && props.active)
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          'aria-hidden': 'true',
+          style: { opacity: active ? 1 : 0.82 },
+        },
+        h('rect', { x: 2.5, y: 3.5, width: 19, height: 13, rx: 2.2, stroke: 'currentColor', strokeWidth: 1.6 }),
+        h('path', { d: 'M8 20.2h8', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round' }),
+        h('path', { d: 'M12.6 9.4l5.2 2.1-2.2 1.1-1.1 2.2-1.9-5.4z', fill: 'currentColor' }),
+      )
+    }
+
+    /** 中央面板：整页展示隔离桌面，点画面 = 在隔离桌面里点一下。 */
+    function DeputyPage() {
       const [frame, setFrame] = useState(null)
       const [health, setHealth] = useState(null)
       const [err, setErr] = useState(null)
       const [opening, setOpening] = useState(false)
-      const [pos, setPos] = useState(null)
       const imgRef = useRef(null)
-      const dragRef = useRef(null)
       const mountedRef = useRef(true)
       const pullingRef = useRef(false)
       const beatingRef = useRef(false)
@@ -115,13 +150,12 @@ window.__ModuleLoader__.load({
               ? prev
               : s,
           )
-          if (onState) onState(s.state)
         } catch (e) {
           if (mountedRef.current) setHealth(null)
         } finally {
           beatingRef.current = false
         }
-      }, [onState])
+      }, [])
 
       useEffect(() => {
         mountedRef.current = true
@@ -136,33 +170,6 @@ window.__ModuleLoader__.load({
           clearInterval(t2)
         }
       }, [pull, beat])
-
-      // 拖窗：只认标题栏空白区，按钮点击不触发拖动。
-      const onHeadDown = (e) => {
-        if (e.button !== 0 || e.target.closest('button')) return
-        const el = e.currentTarget.parentElement
-        const rect = el.getBoundingClientRect()
-        dragRef.current = { dx: e.clientX - rect.left, dy: e.clientY - rect.top }
-        setPos({ left: rect.left, top: rect.top })
-        e.preventDefault()
-      }
-      useEffect(() => {
-        if (!pos) return
-        const move = (e) => {
-          const d = dragRef.current
-          if (!d) return
-          setPos({ left: e.clientX - d.dx, top: e.clientY - d.dy })
-        }
-        const up = () => {
-          dragRef.current = null
-        }
-        window.addEventListener('pointermove', move)
-        window.addEventListener('pointerup', up)
-        return () => {
-          window.removeEventListener('pointermove', move)
-          window.removeEventListener('pointerup', up)
-        }
-      }, [pos])
 
       const onClick = async (e) => {
         const img = imgRef.current
@@ -215,31 +222,30 @@ window.__ModuleLoader__.load({
 
       const state = health && health.state ? health.state : 'unknown'
       const live = Boolean(frame)
-      const style = pos ? { left: pos.left + 'px', top: pos.top + 'px', bottom: 'auto' } : undefined
+      const isWin = !health || health.platform === 'win32'
 
       return h(
-        'div',
-        { className: 'ddn-win', style },
+        'section',
+        { className: 'ddp-page' },
         h(
-          'div',
-          { className: 'ddn-head', onPointerDown: onHeadDown },
-          h('span', { className: 'ddn-dot', 'data-live': live ? '1' : '0' }),
-          h('span', { className: 'ddn-title' }, '虚拟桌面'),
-          h('span', { className: 'ddn-tag' }, state),
-          h('span', { className: 'ddn-spacer' }),
-          h('button', { className: 'ddn-btn', type: 'button', onClick: open, disabled: opening, title: '开隔离桌面（Windows 上会弹 UAC）' }, opening ? '打开中' : '打开'),
-          h('button', { className: 'ddn-btn', type: 'button', onClick: close }, '收起'),
-          h('button', { className: 'ddn-btn', type: 'button', onClick: pull }, '刷新'),
-          h('button', { className: 'ddn-btn', type: 'button', onClick: onClose, 'aria-label': '关闭面板' }, '×'),
+          'header',
+          { className: 'ddp-head' },
+          h('span', { className: 'ddp-title' }, PANEL_LABEL),
+          h('span', { className: 'ddp-tag', 'data-live': live ? '1' : '0' }, STATE_TEXT[state] || state),
+          health && health.name ? h('span', { className: 'ddp-tag' }, health.name) : null,
+          h('span', { className: 'ddp-spacer' }),
+          h('button', { className: 'ddp-btn', type: 'button', onClick: open, disabled: opening || !isWin, title: '开隔离桌面（Windows 上会弹 UAC）' }, opening ? '打开中…' : '打开桌面'),
+          h('button', { className: 'ddp-btn', type: 'button', onClick: pull }, '刷新'),
+          h('button', { className: 'ddp-btn', type: 'button', onClick: close, disabled: state !== 'opened' && state !== 'running' }, '收起桌面'),
         ),
         h(
           'div',
-          { className: 'ddn-stage' },
+          { className: 'ddp-stage' },
           frame
             ? h('img', {
                 ref: imgRef,
-                className: 'ddn-img',
-                alt: '隔离桌面',
+                className: 'ddp-img',
+                alt: '隔离桌面画面',
                 src: 'data:image/png;base64,' + frame.png,
                 onClick: onClick,
                 onContextMenu: (e) => {
@@ -249,63 +255,50 @@ window.__ModuleLoader__.load({
               })
             : h(
                 'div',
-                { className: 'ddn-empty' },
-                h('div', null, err ? '未拿到画面：' + err : '还没有画面'),
-                h('div', null, '点「打开」在隔离桌面里起一个桌面会话'),
-                health && health.platform !== 'win32'
-                  ? h('div', null, '（宿主平台是 ' + health.platform + '，真实桌面只在 Windows 上可用）')
-                  : null,
+                { className: 'ddp-empty' },
+                h('b', null, err ? '未拿到画面' : '还没有画面'),
+                h('div', null, err ? err : '点上方「打开桌面」，让宿主在隔离桌面里起一个桌面会话'),
+                h('div', null, '之后这页每 0.7 秒刷新一次；点画面 = 在隔离桌面里点一下'),
+                !isWin ? h('div', null, '（宿主平台是 ' + health.platform + '，真实桌面只在 Windows 上可用）') : null,
               ),
         ),
         h(
-          'div',
-          { className: 'ddn-foot' },
+          'footer',
+          { className: 'ddp-foot' },
           h('span', null, frame ? frame.width + '×' + frame.height : '—'),
-          h('span', { className: 'ddn-spacer' }),
-          h('span', null, '点画面 = 在隔离桌面里点一下'),
+          h('span', null, health && health.pid ? 'pid ' + health.pid : '无会话'),
+          h('span', { className: 'ddp-spacer' }),
+          h('span', null, '所有点击只落在隔离桌面，不碰你当前的主桌面'),
         ),
-      )
-    }
-
-    function Toggle() {
-      const [isOpen, setIsOpen] = useState(false)
-      const [live, setLive] = useState(false)
-      const onState = useCallback((s) => setLive(s === 'opened' || s === 'running'), [])
-      return h(
-        React.Fragment,
-        null,
-        h(
-          'button',
-          { className: 'ddn-toggle', onClick: () => setIsOpen(!isOpen), title: '虚拟桌面面板' },
-          h('span', { className: 'ddn-dot', 'data-live': live ? '1' : '0' }),
-          h('span', null, '桌面'),
-        ),
-        isOpen
-          ? h(ViewerWindow, {
-              onClose: () => setIsOpen(false),
-              onState,
-            })
-          : null,
       )
     }
 
     function apply(ctx) {
       ctx.effect(
         () =>
-          ctx.slots.inject('shell.overlay', () =>
+          ctx.slots.inject('sidebar.panellist', () =>
             ctx.slots.register(
-              { name: 'shell.overlay', id: 'dsh-deputy-desktop', order: 90, label: '虚拟桌面' },
-              Toggle,
+              { name: 'sidebar.panellist', id: PANEL_ID, order: 40, label: PANEL_LABEL },
+              DeputyIcon,
             ),
           ),
-        'dsh-deputy: desktop panel',
+        'dsh-deputy: sidebar entry',
+      )
+      ctx.effect(
+        () =>
+          ctx.slots.inject('main', () =>
+            ctx.slots.register({ name: 'main', key: PANEL_ID }, DeputyPage),
+          ),
+        'dsh-deputy: desktop page',
       )
     }
 
     exports.apply = apply
     exports.inject = ['slots']
-    exports.ViewerWindow = ViewerWindow
-    exports.Toggle = Toggle
+    exports.PANEL_ID = PANEL_ID
+    exports.PANEL_LABEL = PANEL_LABEL
+    exports.DeputyIcon = DeputyIcon
+    exports.DeputyPage = DeputyPage
 
     return module.exports
   },

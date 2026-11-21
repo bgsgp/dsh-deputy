@@ -11,7 +11,7 @@
 | **署名** | **鬼狗子-Zero**（立项 / 需求 / 审阅 · **第一院**） |
 | **发布** | [@bgsgp](https://github.com/bgsgp) |
 | **协议** | MIT |
-| **版本** | 四段式（主.本.本次.总），以 `package.json` 为准 |
+| **版本** | 三段 semver（主.本.总提交数），以 `package.json` 为准 |
 
 ---
 
@@ -26,8 +26,10 @@ npm i -g dsh-deputy
 dsh plugin --profile web add dsh-deputy
 ```
 
-环境要求：Windows x86_64、Node ≥ 20、管理员权限（虚拟桌面必需）。依赖数为 **0**，
-不需要 `allowBuilds`。详细步骤与验证见 [docs/INSTALL.md](docs/INSTALL.md)。
+环境要求：Windows x86_64、Node ≥ 22.12、DSH **0.2.2-rc.1 ≤ 版本 < 0.2.3**、管理员权限（虚拟桌面必需）。
+依赖数为 **0**，不需要 `allowBuilds`。插件清单写在 `package.json` 的 `dsh` 字段
+（`bundle.patch` / `client` / `icon`），**不再有 `dsh.plugin.json`**——0.2.x 已不读取它。
+详细步骤与验证见 [docs/INSTALL.md](docs/INSTALL.md)。
 
 ---
 
@@ -78,7 +80,7 @@ SENSOR   隔离桌面内采帧（灰度）
 SENSE    dHash 距离 + 8×8 网格变化 → 0..1 分数 → 四档
    │      跨档帧进缓冲，满 16 帧 → 4×4 拼图（标签烧进图里）
    │
-SESSION  attachments 推送（一次只花一张图的钱）
+SESSION  attachments.saveImage → 工具结果 image block（一次只花一张图的钱）
    │
 DECIDE   宿主模型：看拼图 + UIA 树 → 选动作
    │
@@ -92,9 +94,9 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 24 项自检：算法 / 闭环 / 桌面状态机 / HTTP 面板
-node scripts/check-plugin.mjs  # 插件注册自检：版本四段式、入口、工具对齐、权限声明
-node scripts/publish-npm.mjs   # npm 发布 dry-run（四段 → 三段映射）
+node test/run-tests.mjs        # 29 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / HTTP 面板 / schema 形态 / 客户端注册
+node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、工具 ABI、image block、icon
+node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
 DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 ```
@@ -105,8 +107,19 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 |---|---|---|
 | `deputy_sense` | 采一帧并打分 | `{score, tier, box, hashDistance}` |
 | `deputy_act` | 在隔离桌面执行动作 + 校验 | `{ok, verdict, inside, outside, retries}` |
-| `deputy_sheet` | 把缓冲帧压成 4×4 送出 | `{frames, budget}` + PNG |
+| `deputy_sheet` | 把缓冲帧压成 4×4 送出 | `{frames, budget, image}` + image content block |
 | `deputy_desktop` | 桌面会话：`status/open/launch/tree/close` | 会话状态 / pid / 窗口树 |
+
+### 界面：侧栏里的一页
+
+左侧「应用」栏（新建 / 搜索 / 自定义 / QQ机器人 / 定时任务 / …）底部会多一行
+**「DSH操作电脑」**。点它，中央面板切到整页的隔离桌面：
+
+- 每 0.7 秒拉一帧灰度画面，点画面 = 在隔离桌面里点一下（坐标归一化，缩放不变形）；
+- 「打开桌面」起会话（Windows 上弹 UAC）、「收起桌面」回收；
+- 这页不是浮窗，也不占会话；切回对话在侧栏点一下即可。
+
+0.2.x 的挂载点是 `sidebar.panellist`（侧栏行）+ `main`（同 key 的整页），细节见 [docs/VIEWER.md](docs/VIEWER.md)。
 
 ---
 
@@ -122,11 +135,12 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `desktop.mjs` 虚拟桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭 |
 | `scripts/windows-desktop.ps1` | 🟡 原型 | 常驻宿主：建桌面 / 启动 / BitBlt / 取树 / SendInput，**未真机回归** |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |
-| `scripts/check-plugin.mjs` | ✅ 可用 | 注册一致性自检 |
-| `scripts/publish-npm.mjs` | ✅ 可用（dry-run 通过） | 四段→三段 semver 映射 + 舞台打包 |
+| `scripts/check-plugin.mjs` | ✅ 可用 | 按 DSH 0.2.2 插件 ABI 机检（清单 / 工具 / 图片 / icon） |
+| `scripts/publish-npm.mjs` | ✅ 可用 | 舞台打包 + 直接 npm publish（标准三段版本） |
 | `cordis.patch.yml` | ✅ 已对齐社区格式 | `- insert: - id/name/config` |
 | MCP stdio 服务 | ✅ 可用 | `initialize` / `tools/list` / `tools/call` |
-| DSH 原生装载 | 🟡 待真机联调 | 依赖宿主 `tools` / `attachments` 实际签名 |
+| 侧栏入口（`client.js`） | ✅ 真机验证（0.2.2-rc.5） | 侧栏「应用」一行「DSH操作电脑」+ 中央整页；`sidebar.panellist` / `main` 同 id 注册，`check-plugin` 防回退到 `shell.overlay` |
+| DSH 原生装载 | ✅ 真机验证（0.2.2-rc.5） | 在测试 profile 里冷启动激活、无 `entry did not activate`；4 个工具用真实 `dsh-tools` 的 `validateArgs` / `assertSupportedJsonSchema` 校验（参数表 + output schema + image block），桌面自动化仍待真机回归 |
 
 **已知未验证点**：x64 `INPUT` 40 字节对齐、隔离桌面 BitBlt 是否拍到硬件加速界面、
 `SetThreadDesktop` 在 PowerShell 进程里的成败、UAC/安全桌面的抢占。
@@ -168,7 +182,7 @@ scripts/
   windows-uia.ps1      一次性 UIA（无隔离桌面，验证用）
   windows-session.ps1  早期碎片版（留作对照）
   check-plugin.mjs     注册一致性自检
-  publish-npm.mjs      四段版本 → npm 三段映射发布
+  publish-npm.mjs      舞台打包 + npm 发布（版本已是标准三段）
 docs/
   DESIGN.md       总体思路与六个关键决策
   SENSING.md      打分公式、拼图成本模型、预算曲线
@@ -181,12 +195,13 @@ docs/
 
 ## 版本号规则
 
-`主版本.本版本.本版本提交数.总提交数`。例：`0.0.15.15` 表示"主版本 0、本版本 0、
-本版本内第 15 次提交、仓库累计第 15 次提交"。
+`主版本.本版本.总提交数`（标准三段 semver，例 `1.2.31`）。总提交数单调递增，
+正好满足 npm「每次发布必须换版本号」的约束。
 
-- 仓库内（`package.json`、`dsh.plugin.json`）用四段式；
-- npm 只认三段，**发布时**由 `scripts/publish-npm.mjs` 映射为 `主.本.总提交数`（例：`0.0.15.15` → `0.0.15`），原值写进包的 `deputyVersion` 字段；
-- `npm run plugin:check` 校验四段式格式与两份清单一致。
+- 仓库与 npm 用同一个三段版本，不再做四段→三段映射；
+- 四段版本（如 `1.2.0.31`）会被 pnpm/npm 直接拒绝（`ERR_PNPM_BAD_PACKAGE_JSON`），
+  这也是本地 `link:` 安装失败的原因；
+- `npm run plugin:check` 校验三段格式、`engines.dsh`、工具 ABI 与图片出口。
 
 ## 致谢与许可
 

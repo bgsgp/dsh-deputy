@@ -1,9 +1,8 @@
-// npm 发布脚本：把仓库的四段版本号映射成 npm 能接受的 semver
+// npm 发布脚本：舞台目录打包后直接 npm publish。
 //
-// 为什么要这个脚本：仓库版本是 `主.本.本次提交数.总提交数`（0.0.12.12），
-// 而 npm 只认三段 semver，`0.0.12.12` 会被直接拒：Invalid version。
-// 映射规则：npm 版 = 主.本.总提交数（总提交数单调递增，天然满足 npm 的"每次发布必须换版本"）。
-// 原始四段版本保留在输出包的 deputyVersion 字段里，不丢信息。
+// 版本号是标准三段 semver（主版本.本版本.总提交数），与 package.json 一致，
+// 不再需要四段 → 三段的映射：pnpm/npm 在本地 link 安装时也会校验版本，
+// 四段（1.2.0.31）会直接报 ERR_PNPM_BAD_PACKAGE_JSON / Invalid version。
 //
 // 用法：
 //   node scripts/publish-npm.mjs              # 默认 dry-run，只看会发布什么
@@ -29,18 +28,14 @@ function fail(msg) {
 }
 
 const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
-const parts = String(pkg.version).split('.')
 
-// 1. 校验仓库版本是四段
-if (parts.length !== 4 || parts.some((p) => !/^\d+$/.test(p))) {
-  fail(`仓库版本必须是四段纯数字（主.本.本次.总），现在是 "${pkg.version}"`)
+// 1. 校验标准 semver
+if (!/^\d+\.\d+\.\d+$/.test(String(pkg.version))) {
+  fail(`版本必须是三段 semver（主.本.总），现在是 "${pkg.version}"`)
 }
+console.log(`发布版本 ${pkg.version}`)
 
-// 2. 映射到 semver：patch 取总提交数，保证单调递增
-const npmVersion = `${parts[0]}.${parts[1]}.${parts[3]}`
-console.log(`仓库版本 ${pkg.version}  →  npm 版本 ${npmVersion}`)
-
-// 3. 舞台目录：只放包内声明的文件，顺带避免把杂物推上去
+// 2. 舞台目录：只放包内声明的文件，顺带避免把杂物推上去
 const stage = mkdtempSync(path.join(tmpdir(), 'dsh-deputy-npm-'))
 try {
   for (const entry of pkg.files ?? []) {
@@ -51,9 +46,6 @@ try {
 
   const outPkg = {
     ...pkg,
-    version: npmVersion,
-    // 原始四段版本留档，装包的人仍能看到提交计数
-    deputyVersion: pkg.version,
     publishConfig: { access: 'public', registry: REGISTRY },
   }
   writeFileSync(path.join(stage, 'package.json'), JSON.stringify(outPkg, null, 2) + '\n')

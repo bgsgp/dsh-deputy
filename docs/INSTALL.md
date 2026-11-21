@@ -8,11 +8,26 @@
 | 项 | 要求 |
 |---|---|
 | 系统 | Windows x86_64（插件 `os: ["win32"]`） |
-| Node | ≥ 20 |
-| DSH | 能加载 `dsh.bundle.patch` 的版本 |
+| Node | ≥ 22.12（`engines.node`） |
+| DSH | `>=0.2.2-rc.1 <0.2.3-0`（`engines.dsh`，不满足会被拒绝安装/激活） |
 | 权限 | 管理员（虚拟桌面必须，见下） |
 
 依赖数为 **0**，不需要 `allowBuilds` 构建授权。
+
+插件清单全部在 `package.json` 里，这是 DSH 0.2.x 的唯一形态：
+
+```json
+"dsh": {
+  "bundle": { "patch": "./cordis.patch.yml", "platforms": ["win32"] },
+  "client": { "platform": "web", "inject": ["@deepseek-ai/dsh-client-ui-renderer"] }
+},
+"icon": "assets/icon.svg",
+"engines": { "node": ">=22.12.0", "dsh": ">=0.2.2-rc.1 <0.2.3-0" }
+```
+
+`dsh.plugin.json`（0.1.x 时代的 entry / provides / permissions 声明）已删除：
+0.2.x 不读取它，留着只会误导安装者。权限仍然在 `scripts/windows-desktop.ps1`
+里按需申请，不靠清单声明。
 
 ## 方式 A：从 GitHub 直装（推荐）
 
@@ -36,27 +51,18 @@ npm i -g dsh-deputy          # 或 npm i dsh-deputy
 dsh plugin --profile web add dsh-deputy
 ```
 
-### 发布者：为什么不能直接 npm publish
+### 发布者：版本号与 npm 发布
 
-npm 只认**三段 semver**，而本仓库版本是四段 `主.本.本次提交数.总提交数`。
-直接 `npm publish` 会报：
-
-```
-npm error Invalid version: "0.0.12.12"
-```
-
-这是格式问题，和登录无关，必须先映射。仓库自带脚本做这件事：
+仓库版本就是标准三段 semver（`主.本.总提交数`，例如 `1.2.31`），
+npm 与 `link:` 本地安装都能直接接受，不需要任何映射。
 
 ```powershell
 node scripts/publish-npm.mjs            # 默认 dry-run，只打印会发布什么
 node scripts/publish-npm.mjs --publish  # 真发布（需先 npm login）
 ```
 
-映射规则：
-
-| 仓库（四段） | npm（三把） | 说明 |
-|---|---|---|
-| `0.0.12.12` | `0.0.12` | patch 位取**总提交数**，单调递增；原四段值保留在包的 `deputyVersion` 字段 |
+> 为什么不能再用四段版本：pnpm/npm 对 `1.2.0.31` 会直接报
+> `ERR_PNPM_BAD_PACKAGE_JSON: Invalid version`，本地 `dsh plugin add link:...` 也会失败。
 
 总提交数天然递增 → 正好满足 npm“每次发布必须换版本号、不能重复发布”的硬约束。
 
@@ -102,7 +108,7 @@ dsh plugin --profile web add .
 | `deputy_desktop` | `{ "op": "status" }` → `state: "idle"` |
 | `deputy_sense` | 采一帧打分（未开桌面会报错） |
 | `deputy_act` | 在隔离桌面执行动作 + ROI 校验 |
-| `deputy_sheet` | 推一张 4×4 联系表 |
+| `deputy_sheet` | 返回一张 4×4 联系表的 image 内容块（`attachments.saveImage`） |
 
 ## 提权说明（第一次开桌面会弹 UAC）
 
@@ -119,7 +125,7 @@ dsh plugin --profile web add .
 ## 五步验证
 
 1. `dsh plugin --profile web list` 能看到 `dsh-deputy`；
-2. `node scripts/check-plugin.mjs` 全绿；
+2. `node scripts/check-plugin.mjs` 全绿（含 0.2.2 清单、`engines.dsh`、工具 ABI、image block、icon）；
 3. `deputy_desktop { op: "status" }` → `idle`；
 4. `deputy_desktop { op: "open" }` → `opened`，**看返回里的 `attached` 是不是 true**；
 5. `deputy_desktop { op: "close" }` → 再 `status` 为 `closed`。
@@ -127,9 +133,17 @@ dsh plugin --profile web add .
 第 4 步是真正的分水岭：`attached: true` 才说明 `SetThreadDesktop` 成功，
 否则后面的采帧和输入都会落在错误桌面上。
 
+补记（0.2.2-rc.5 真机结论）：
+
+- 冷启动一个带 deputy 的 profile（`dsh --profile <name> --no-open --port 0`）时，
+  不应再出现 `warning: 1 entry did not activate`；出现过就说明 ABI 又漂了。
+- 工具 schema 已用真实 `@deepseek-ai/dsh-tools` 的 `validateArgs` 与
+  `assertSupportedJsonSchema` 跑过；这两项比自检更严格，改 schema 后建议直接跑一遍。
+- `desktop` profile 只由 Electron 应用接管，`dsh plugin add` 之后要重启 DSH 才会装载新版本。
+
 ## 上架商城（可选，要提 PR）
 
-商城 CI 三个硬条件：`dsh.bundle` 已声明（✅）、仓库满 1 天且提交数 ≥ 10（✅）、
+商城 CI 三个硬条件：`dsh.bundle` 已声明（✅）、`icon` 已提供（✅ `assets/icon.svg`）、提交数 ≥ 10（✅）、
 仓库带 `dsh-plugin` topic（需手动加）：
 
 ```powershell

@@ -7,7 +7,7 @@ import { UiaBridge, createUiaActuator, createWindowsSensor } from '../uia-bridge
 import { Budget } from '../budget.mjs'
 import * as A from '../action.mjs'
 
-const SERVER_INFO = { name: 'dsh-deputy', version: '0.1.0' }
+const SERVER_INFO = { name: 'dsh-deputy', version: '1.2.0' }
 
 function fakeSensor() {
   let t = 0

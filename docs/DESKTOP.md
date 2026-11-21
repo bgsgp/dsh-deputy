@@ -88,8 +88,9 @@ await session.open()
 const deputy = createDeputy({
   sensor: sessionSensor(session),      // 采帧 → 隔离桌面
   actuator: sessionActuator(session),  // 动作 → 隔离桌面
-  onEvidence: (ev) => attachments.add(ev.png),
 })
+// 图片出口：deputy_sheet 的 render() 返回 image content block，
+// PNG 由 DSH 0.2.x 的 ctx.attachments.saveImage() 变成 ImageAttachmentRef。
 ```
 
 感知、打分、拼图、ROI 校验全部不变——它们本来就不认识"桌面"是什么，这正是分层的价值。

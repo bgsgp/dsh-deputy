@@ -1,15 +1,29 @@
 {
   "name": "dsh-deputy",
-  "version": "1.1.2.30",
+  "version": "1.2.31",
   "description": "DSH deputy: change-scored desktop sensing packed into 4x4 contact sheets, plus a real isolated Windows desktop you can actually operate in.",
   "type": "module",
   "main": "src/index.mjs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bgsgp/dsh-deputy.git"
+    "url": "git+ssh://git@github.com/bgsgp/dsh-deputy.git"
   },
-  "bin": {"deputy-mcp": "src/mcp/server.mjs"},
-  "files": ["client.js", "src/", "scripts/", "docs/", "cordis.patch.yml", "dsh.plugin.json", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE"],
+  "icon": "assets/icon.svg",
+  "bin": {
+    "deputy-mcp": "src/mcp/server.mjs"
+  },
+  "files": [
+    "client.js",
+    "assets/",
+    "src/",
+    "scripts/",
+    "docs/",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "exports": {
     ".": "./src/index.mjs",
     "./client": "./client.js",
@@ -30,19 +44,49 @@
     "publish:npm:real": "node scripts/publish-npm.mjs --publish"
   },
   "dsh": {
-    "plugin": "./dsh.plugin.json",
-    "bundle": {"patch": "./cordis.patch.yml"},
-    "client": {"platform": "web", "inject": ["@deepseek-ai/dsh-client-runtime", "@deepseek-ai/dsh-client-ui-layout"]}
+    "bundle": {
+      "patch": "./cordis.patch.yml",
+      "platforms": [
+        "win32"
+      ]
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ],
+      "immediately": false
+    }
   },
-  "keywords": ["deepseek-harness", "dsh", "dsh-plugin", "dsh-client-plugin", "computer-use", "virtual-desktop", "windows", "ui-automation", "desktop-automation", "mcp", "contact-sheet"],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-client-plugin",
+    "computer-use",
+    "virtual-desktop",
+    "windows",
+    "ui-automation",
+    "desktop-automation",
+    "mcp",
+    "contact-sheet"
+  ],
   "author": "沐璃-Zero",
-  "contributors": ["鬼狗子-Zero"],
+  "contributors": [
+    "鬼狗子-Zero"
+  ],
   "license": "MIT",
-  "engines": {"node": ">=20"},
-  "os": ["win32"],
+  "engines": {
+    "node": ">=22.12.0",
+    "dsh": ">=0.2.2-rc.1 <0.2.3-0"
+  },
+  "os": [
+    "win32"
+  ],
   "peerDependencies": {
-    "react": "^18.2.0",
-    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
-    "@deepseek-ai/dsh-client-ui-layout": "^0.1.0-rc.6"
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh": ">=0.2.2-rc.1 <0.2.3-0",
+    "react": "^18.2.0"
   }
 }

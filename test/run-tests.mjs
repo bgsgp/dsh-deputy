@@ -1,6 +1,7 @@
 // 无依赖自检：node test/run-tests.mjs
 // 这些断言覆盖纯算法、闭环、桌面状态机与 HTTP 面板，不依赖 Windows。
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { scoreFrame, gridDelta, toGray, downscaleGray, dHash, hamming } from '../src/diff.mjs'
 import { packSheet, labelOf } from '../src/sheet.mjs'
 import { expandBox, verifyAction, cropGray, meanAbsDiff } from '../src/roi.mjs'
@@ -8,7 +9,7 @@ import { Budget } from '../src/budget.mjs'
 import { createDeputy } from '../src/runner.mjs'
 import { DesktopSession, createFakeTransport, sessionSensor, sessionActuator } from '../src/desktop.mjs'
 import { createViewer } from '../src/viewer.mjs'
-import { toolSpecs } from '../src/index.mjs'
+import { toolSpecs, registerTools, toParameters } from '../src/index.mjs'
 
 const PASS = []
 const FAILED = []
@@ -263,6 +264,140 @@ await test('工具输出：跳过采样与拼图预算耗尽均符合声明且�
   assert.deepEqual(dropped, { frames: 0, dropped: 'sheet-budget' })
   assert.equal(sheet.outputSchema.properties.budget.type, 'object')
   assert.match(sheet.render({}, dropped)[0].text, /未推送/)
+})
+
+await test('工具输出：拼图以 image block 返回，附件是 saveImage 的引用', async () => {
+  const saved = []
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47])
+  const sheet = toolSpecs(
+    { flush: async () => ({ frames: [{}, {}], budget: {}, deduped: true, png }) },
+    {},
+    {
+      saveImage: async (input) => {
+        saved.push(input)
+        return { attachmentId: 'att_1', mediaType: 'image/png', bytes: 4, width: 8, height: 8, name: input.name }
+      },
+    },
+  )[2]
+  const value = await sheet.handler({ reason: 'test' })
+  assert.equal(saved.length, 1)
+  assert.equal(saved[0].mediaType, 'image/png')
+  assert.deepEqual([...saved[0].data], [0x89, 0x50, 0x4e, 0x47])
+  assert.equal(value.image.attachmentId, 'att_1')
+  const blocks = sheet.render({}, value)
+  assert.deepEqual(blocks.map((b) => b.type), ['text', 'image'])
+  assert.equal(blocks[1].attachment.attachmentId, 'att_1')
+  assert.equal(sheet.outputSchema.properties.image.type, 'object')
+})
+
+await test('工具输出：attachments 不可用时拼图只回文本，不抛异常', async () => {
+  const sheet = toolSpecs({ flush: async () => ({ frames: [{}], budget: {}, png: Buffer.from([1]) }) }, {})[2]
+  const value = await sheet.handler({ reason: 'x' })
+  assert.equal(value.image, undefined)
+  assert.deepEqual(sheet.render({}, value).map((b) => b.type), ['text'])
+})
+
+await test('注册：只走 0.2.x register(defineTool)，只读工具标并发安全', async () => {
+  const specs = toolSpecs({ observe: async () => ({}) }, {})
+  const registered = []
+  const sink = registerTools({ tools: { register: (def) => registered.push(def) } }, specs)
+  assert.equal(sink.length, 0)
+  assert.equal(registered.length, 4)
+  assert.equal(typeof registered[0].isConcurrencySafe, 'function')
+  assert.equal(registered[0].isConcurrencySafe({}), true)
+  assert.equal(registered[1].isConcurrencySafe, undefined)
+  for (const def of registered) {
+    assert.equal(def.output.schema.type, 'object')
+    assert.equal(typeof def.output.render, 'function')
+    assert.equal(typeof def.execute, 'function')
+    assert.ok(def.parameters && typeof def.parameters === 'object')
+  }
+  // 缺 tools 服务时交回 spec，而不是静默吞掉
+  const orphan = registerTools({}, specs)
+  assert.equal(orphan.length, 4)
+})
+
+await test('工具 schema：output 用 required 数组、参数表 object 显式 additionalProperties', async () => {
+  const specs = toolSpecs({ observe: async () => ({}) }, {})
+  const requiredRoots = { deputy_act: ['ok'], deputy_sheet: ['frames'], deputy_desktop: ['state'] }
+  const assertNoInlineRequired = (node, path) => {
+    if (!node || typeof node !== 'object') return
+    for (const [key, child] of Object.entries(node)) {
+      if (key === 'required' && typeof child === 'boolean') assert.fail(`${path} 仍是内联 required，真实注册会抛 JsonSchemaError`)
+      assertNoInlineRequired(child, `${path}.${key}`)
+    }
+  }
+  for (const spec of specs) {
+    const schema = spec.outputSchema
+    assert.equal(schema.type, 'object')
+    assertNoInlineRequired(schema, spec.name)
+    if (requiredRoots[spec.name]) assert.deepEqual(schema.required, requiredRoots[spec.name])
+    else assert.equal(schema.required, undefined)
+    const objects = []
+    const collect = (node, path) => {
+      if (!node || typeof node !== 'object') return
+      if (node.type === 'object' && path) objects.push(path)
+      for (const [key, child] of Object.entries(node.properties ?? {})) collect(child, `${path}.${key}`)
+      if (node.items) collect(node.items, `${path}[]`)
+    }
+    collect({ type: 'object', properties: spec.inputSchema?.properties }, '')
+    // author 参数表里的 object 必须显式 additionalProperties，否则真实 dsh-tools 编译参数就抛
+    for (const path of objects) {
+      const node = toParameters(spec.inputSchema)[path.split('.').at(-1)]
+      assert.equal(typeof node.additionalProperties, 'boolean')
+    }
+  }
+})
+
+await test('客户端：sidebar.panellist + main 同 id 注册（stub 加载 client.js）', async () => {
+  const savedWindow = globalThis.window
+  const savedDocument = globalThis.document
+  const React = {
+    createElement: () => null,
+    useState: () => [null, () => {}],
+    useEffect: () => {},
+    useRef: () => ({ current: null }),
+    useCallback: (fn) => fn,
+  }
+  let loaded = null
+  globalThis.window = { __ModuleLoader__: { load: (mod) => { loaded = mod } } }
+  globalThis.document = {
+    querySelector: () => null,
+    createElement: () => ({ dataset: {} }),
+    head: { appendChild: () => {} },
+  }
+  try {
+    const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+    new Function('require', src)(() => React)
+    assert.ok(loaded, 'client.js 必须调用 window.__ModuleLoader__.load')
+    assert.equal(loaded.id, 'dsh-deputy')
+    const exp = loaded.factory(() => React)
+    assert.deepEqual(exp.inject, ['slots'])
+    assert.equal(typeof exp.apply, 'function')
+    const calls = []
+    exp.apply({
+      effect: (body) => body(),
+      slots: {
+        inject(name, cb) {
+          calls.push(['inject', name])
+          return cb()
+        },
+        register(opts) {
+          calls.push(['register', opts.name, opts.id ?? opts.key, opts.label])
+          return () => {}
+        },
+      },
+    })
+    assert.deepEqual(calls, [
+      ['inject', 'sidebar.panellist'],
+      ['register', 'sidebar.panellist', 'dsh-deputy-desktop', 'DSH操作电脑'],
+      ['inject', 'main'],
+      ['register', 'main', 'dsh-deputy-desktop', undefined],
+    ])
+  } finally {
+    globalThis.window = savedWindow
+    globalThis.document = savedDocument
+  }
 })
 
 await test('HTTP 面板：健康检查、合并采帧、坐标换算与输入校验', async () => {

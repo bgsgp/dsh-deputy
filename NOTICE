@@ -9,7 +9,7 @@ Licensed under the MIT License (see LICENSE).
    https://github.com/Yu-tao-Li/dsh-computer-use-win
    License: MIT
    参考点：MCP stdio 服务 + PowerShell UIA 后端的组织方式，
-           dsh.plugin.json / cordis.patch.yml 的插件声明形态，
+           package.json 的 dsh 字段 / cordis.patch.yml 的插件声明形态，
            以及 UIA 树导出与 SendInput 坐标输入的思路。
 
 2. dsh-see-now

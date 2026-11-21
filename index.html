@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dsh-deputy · 把桌面变成可测量的信号</title>
-<meta name="description" content="dsh-deputy 是 DeepSeek Harness 的桌面代理插件：变化评分感知、4×4 联系表、真实隔离的 Windows 桌面，以及能在 DSH 里手动点击的虚拟桌面浮窗。">
+<meta name="description" content="dsh-deputy 是 DeepSeek Harness 的桌面代理插件：变化评分感知、4×4 联系表、真实隔离的 Windows 桌面，以及 DSH 侧栏里能手动点击的虚拟桌面。">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230D1215'/%3E%3Crect x='6' y='9' width='20' height='14' rx='2' fill='none' stroke='%2346D3B4' stroke-width='1.6'/%3E%3Cpath d='M14 16h8M18 13v6' stroke='%23E8B04B' stroke-width='2'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Serif+SC:wght@600;700&family=Noto+Sans+SC:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
@@ -191,7 +191,7 @@ footer{border-top:1px solid var(--line);padding:38px 0 54px}
     </a>
     <nav class="topnav">
       <a class="hide-sm" href="#flow">闭环</a>
-      <a class="hide-sm" href="#slot">浮窗</a>
+      <a class="hide-sm" href="#slot">侧栏面板</a>
       <a href="#install">安装</a>
       <a href="https://github.com/bgsgp/dsh-deputy">GitHub</a>
       <a href="https://www.npmjs.com/package/dsh-deputy">npm</a>
@@ -300,9 +300,9 @@ footer{border-top:1px solid var(--line);padding:38px 0 54px}
     <div class="sec-head">
       <h2>嵌在 DSH 界面里<br>那块能点的虚拟桌面</h2>
       <p>
-        左侧导航（插件 / 自动化任务 / 上下文洞察 / 学习 / 更多）不是公开插槽，三方插件塞不进去。
-        插件能用的席位是壳层浮层、右侧详情位、左栏底部动作位、右侧文档 tab —— dsh-deputy 选了壳层浮层，
-        官方文档里常态置顶窗口本来就该待在这里。
+        0.2.x 给三方插件开了 `sidebar.panellist`：左侧「应用」列表里的一行，点开占满中央面板。
+        dsh-deputy 就挂在这里，名字叫「DSH操作电脑」——跟新建 / 搜索 / 免费搜索 / 定时任务并排，
+        不再用左下角浮窗胶囊，也不抢会话。
       </p>
     </div>
 
@@ -313,9 +313,13 @@ footer{border-top:1px solid var(--line);padding:38px 0 54px}
       </thead>
       <tbody>
         <tr>
-          <td>shell.overlay<p class="pick">正在使用</p></td>
-          <td>整帧浮层</td>
-          <td><p>可容纳一块持续刷新的画面，位置与尺寸由用户拖动决定；不抢占正文区域，收起后不留痕迹。</p></td>
+          <td>sidebar.panellist + main<p class="pick">正在使用</p></td>
+          <td>侧栏一行 + 中央整页</td>
+          <td><p>常驻在「应用」栏，点行由侧栏自己 `selectPanel(id)` 切到同 key 的整页；画面能铺满中央区，切页即停轮询。</p></td>
+        </tr>
+        <tr>
+          <td>shell.overlay</td><td>整帧浮层</td>
+          <td><p>上一版用这个做「桌面」胶囊浮窗；用户要的是与应用栏并列的常驻项，已弃用。</p></td>
         </tr>
         <tr>
           <td>details</td><td>右侧单例槽</td>
@@ -335,7 +339,7 @@ footer{border-top:1px solid var(--line);padding:38px 0 54px}
     <div class="dual" style="margin-top:34px">
       <div class="panelbox">
         <h3>面板怎么取画面<span>127.0.0.1:17872</span></h3>
-        <p>插件在宿主里起一个只绑回环地址的 HTTP 数据面，浮窗每 700 ms 拉一次当前帧，点画面就把归一化坐标回传。</p>
+        <p>插件在宿主里起一个只绑回环地址的 HTTP 数据面，页面每 700 ms 拉一次当前帧，点画面就把归一化坐标回传。</p>
 <pre><span class="c"># 只绑回环，不出网</span>
 <span class="a">GET</span>  /api/health      <span class="c">→ 宿主平台与版本</span>
 <span class="a">GET</span>  /api/frame       <span class="c">→ base64 灰度 PNG</span>
@@ -346,13 +350,13 @@ footer{border-top:1px solid var(--line);padding:38px 0 54px}
       </div>
       <div class="panelbox">
         <h3>点下去的坐标<span>归一化 0..1</span></h3>
-        <p>浮窗把点击位置换算成 0..1 的比例再回传，宿主侧按当前桌面分辨率还原成像素。窗口被拖大拖小，点哪儿还是点哪儿。</p>
+        <p>页面把点击位置换算成 0..1 的比例再回传，宿主侧按当前桌面分辨率还原成像素。窗口宽窄变化，点哪儿还是点哪儿。</p>
 <pre><span class="c">// client.js</span>
-onPointerDown(<span class="t">e</span>) {
-  <span class="t">const</span> r = <span class="t">e</span>.currentTarget.getBoundingClientRect()
+onClick(<span class="t">e</span>) {
+  <span class="t">const</span> r = img.getBoundingClientRect()
   <span class="t">const</span> x = (<span class="t">e</span>.clientX - r.left) / r.width
   <span class="t">const</span> y = (<span class="t">e</span>.clientY - r.top)  / r.height
-  <span class="t">await</span> post(<span class="a">'/api/input'</span>, { op:<span class="a">'click'</span>, x, y })
+  <span class="t">await</span> post(<span class="a">'/api/input'</span>, { type:<span class="a">'click'</span>, x, y })
 }
 </pre>
       </div>
@@ -365,8 +369,8 @@ onPointerDown(<span class="t">e</span>) {
     <div class="sec-head">
       <h2>装上之后<br>你会看到什么</h2>
       <p>
-        安装走 DSH 的插件页，或者直接给 pnpm 一条指令。装完左下角会多一个「桌面」胶囊：点开是浮窗，
-        没开桌面、已关闭、宿主不是 Windows 三种空态各有各的说明，不会只给你一个转圈。
+        安装走 DSH 的插件页，或者直接给 pnpm 一条指令。装完左侧「应用」栏会多一行「DSH操作电脑」：
+        点开是整页桌面，没开桌面、已关闭、宿主不是 Windows 三种空态各有各的说明，不会只给你一个转圈。
       </p>
     </div>
 
@@ -400,7 +404,7 @@ node scripts/publish-npm.mjs  <span class="c"># dry-run 看会发什么</span>
         <li><b>开隔离桌面要管理员。</b>CreateDesktopW 与 SetThreadDesktop 权限不足时插件直接报错，不会悄悄降级到你的主桌面。</li>
         <li><b>输入目前只有 click 与 type。</b>拖拽、滚轮、组合键还没进协议。</li>
         <li><b>面板是 700 ms 采样，不是视频流。</b>快速动画会看起来一顿一顿，这是刻意的——它要的是「变没变」，不是「多流畅」。</li>
-        <li><b>客户端契约还在 rc 阶段。</b>DSH 的插槽 API 还会变，浮窗加载失败时先看宿主版本，再看 CSP 是否允许访问 127.0.0.1。</li>
+        <li><b>客户端契约还在 rc 阶段。</b>DSH 的插槽 API 还会变，面板加载失败时先看宿主版本，再看 CSP 是否允许访问 127.0.0.1。</li>
       </ul>
     </div>
   </div>
