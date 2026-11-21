@@ -239,6 +239,33 @@ export function createViewer({ session, port = DEFAULT_VIEW_PORT, host = '127.0.
       }
     }
 
+    if (url.pathname === '/api/apps') {
+      if (req.method !== 'GET') return methodNotAllowed(res, 'GET')
+      try {
+        await session.ensureOpen()
+        const apps = await session.listApps()
+        return json(res, 200, { ok: true, apps, count: apps.length })
+      } catch (e) {
+        noteFailure('os', e)
+        return json(res, 200, { ok: false, reason: e.message, code: e.code ?? null })
+      }
+    }
+
+    if (url.pathname === '/api/launch-app') {
+      if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
+      try {
+        const b = await bodyOf(req)
+        if (typeof b.name !== 'string' || !b.name.trim()) throw badRequest('name 必须是开始菜单里的应用名')
+        await session.ensureOpen()
+        const r = await session.launchApp(b.name)
+        setOsStatus({ state: session.state, running: true, error: null })
+        return json(res, 200, { ok: true, name: r.name, target: r.target, pid: r.pid ?? null })
+      } catch (e) {
+        noteFailure('os', e)
+        return json(res, 200, { ok: false, reason: e.message, code: e.code ?? null, candidates: e.candidates ?? null })
+      }
+    }
+
     if (url.pathname === '/api/launch') {
       if (req.method !== 'POST') return methodNotAllowed(res, 'POST')
       try {

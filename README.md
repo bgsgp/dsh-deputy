@@ -78,6 +78,22 @@ dsh plugin --profile web add dsh-deputy
 代价也说清楚：`user` 模式下自动化**真的占用鼠标键盘**，跑任务时不要抢鼠标；需要"不打断你"时把
 `mode` 切回 `isolated`（能力受限，但完全不碰你的桌面）。
 
+## 对照豆包那套「截图 → 点击」闭环
+
+豆包（字节 UI-TARS 系）自述的实现有六条设计。对照到本插件：
+
+| 豆包的规矩 | 本插件现状 |
+|---|---|
+| ① 坐标归一化到 0–1000 | ✅ 面板把 0..1 归一化坐标换成帧像素，再按 `frameWidth`（缩放前）换算，附窗口 `origin` 偏移 |
+| ② 改布局的动作之后必须重新截图再算坐标 | ✅ `runner.step` 发现画面尺寸/布局变化就回 `rescan: true`，模型据此重新 `deputy_sense`/`/api/frame`，不许照旧图连点 |
+| ③ 会话隔离用另一块桌面 | ✅ `mode: virtual`（任务视图新桌面）/`isolated`（独立 Win32 桌面）/ `user`（当前桌面） |
+| ④ 登录、验证码、扫码、MFA 一律交人 | 🟡 只做到"失败不硬撑"：动作校验不过就停、回 `verdict`；**没有**自动识别登录页并交还控制权（见 [docs/ROADMAP.md](docs/ROADMAP.md)） |
+| ⑤ 应用必须按开始菜单清单的精确名称启动 | ✅ `deputy_desktop { op: "apps" }` 枚举开始菜单（`.lnk`/`.url` + `shell:AppsFolder` 打包应用，真机 207 项），`op: "launch-app", name: "Google Chrome"` 只认精确名称；找不到回 `APP_NOT_FOUND` + 候选名 |
+| ⑥ 落盘类操作用文件系统回读校验 | 🟡 插件自身不做，但会话侧的 `read`/`glob` 就是回读通道（截图说保存成功 ≠ 文件在） |
+
+本插件不做豆包那套「模型看像素猜控件」：能走 UIA 语义（`InvokePattern`/`ValuePattern`）就走语义，
+键鼠是兜底；真正的取舍写在 [docs/DESIGN.md](docs/DESIGN.md)。
+
 ## 为什么要"常驻宿主"
 
 Windows 桌面对象是引用计数的：建它的进程一退出，桌面就没了。所以不能"建一下记个 handle
@@ -121,7 +137,7 @@ BUDGET   normal → coarse → halt，允许放弃
 ## 快速开始
 
 ```bash
-node test/run-tests.mjs        # 53 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
+node test/run-tests.mjs        # 55 项自检：算法 / 闭环 / 桌面状态机 / 附件图片 / 浏览器等待、遮挡、多标签、幂等、下载 / 监视窗缩放与点击 / 宿主输入投递 / HTTP 面板
 node scripts/check-plugin.mjs  # 插件自检：0.2.2 清单、engines.dsh、两个组件、9 个工具 ABI、image block、icon
 node scripts/publish-npm.mjs   # npm 发布 dry-run（版本已是标准三段）
 
@@ -149,7 +165,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `deputy_sense` | 采一帧并打分 | `{score, tier, box, hashDistance}` |
 | `deputy_act` | 在隔离桌面执行动作 + 校验 | `{ok, verdict, inside, outside, retries}` |
 | `deputy_sheet` | 把缓冲帧压成 4×4 送出 | `{frames, budget, image}` + image content block |
-| `deputy_desktop` | 桌面会话：`status/open/launch/tree/close` | 会话状态 / pid / 窗口树 |
+| `deputy_desktop` | 桌面会话：`status/open/apps/launch-app/launch/tree/close` | 会话状态 / pid / 开始菜单应用清单 / 窗口树 |
 
 **浏览器（browser）五个工具**（完整 CDP 实现，细节见 [docs/BROWSER.md](docs/BROWSER.md)；1.3.39 待真机回归）
 
@@ -187,6 +203,7 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | `roi.mjs` 校验 | ✅ 实现 + 单测 | 三分 verdict |
 | `budget.mjs` 预算 | ✅ 实现 + 单测 | 三档降级 |
 | `runner.mjs` 闭环 | ✅ 实现 + 单测（注入式，无需 Windows） | 重试 / 熔断 |
+| 应用白名单（开始菜单） | ✅ 真机验证 | `op: "apps"` 枚举 `.lnk`/`.url` + `shell:AppsFolder`（真机 207 项）；`op: "launch-app"` 只认精确名称，真机拉起 Chrome 到虚拟桌面新标签页、记事本走打包应用通道 |
 | `desktop.mjs` 桌面会话 | ✅ 实现 + 单测（假宿主） | 状态机 / 守卫 / 幂等关闭；`mode=user\|virtual\|isolated` 透传给宿主；宿主拒绝输入时抛 `VDESK_NOT_ACTIVE` |
 | `scripts/windows-desktop.ps1` | ✅ 三模式真机验证 | 常驻宿主 `-Mode user\|isolated`。`user`：整屏 1920×1080 捕获 + `SendInput`，实测点开记事本正文打出 `deputy user desktop ok 123`；`isolated`：建桌面 + 逐窗口 `PrintWindow` + `PostMessage`，实测打开 Edge 拍到 B 站首页并打出 `deputy desktop hello 123`；`virtual`：`Win+Ctrl+D` 新桌面 + 彩色整屏 + `SendInput`，实测记事本里打出 `deputy virtual desktop ok 789` 且关会话后桌面数回到 1 |
 | `scripts/windows-uia.ps1` | 🟡 原型 | 一次性 UIA 调用（无隔离桌面） |

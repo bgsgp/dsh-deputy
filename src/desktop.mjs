@@ -167,6 +167,14 @@ export function createFakeTransport() {
           const gray = new Uint8Array(w * h).fill(200)
           return { ok: true, width: w, height: h, grayBase64: Buffer.from(gray).toString('base64') }
         }
+        case 'apps':
+          return { ok: true, apps: [{ name: 'Notepad', path: 'C:/fake/Notepad.lnk', source: 'user' }], count: 1 }
+        case 'launch-app':
+          if (payload.name !== 'Notepad') {
+            return { ok: false, code: 'APP_NOT_FOUND', error: '开始菜单里没有精确名为 ' + payload.name + ' 的应用', candidates: [] }
+          }
+          state.pid = (state.pid ?? 4320) + 1
+          return { ok: true, name: 'Notepad', target: 'C:/Windows/System32/notepad.exe', pid: state.pid }
         case 'tree':
           return { ok: true, tree: { name: 'deputy-desktop', type: 'Pane', children: [] } }
         case 'input':
@@ -249,6 +257,31 @@ export class DesktopSession {
     const commandLine = args.map(quoteWindowsArg).join(' ')
     const r = await this.transport.request({ op: 'launch', exe: exe.trim(), args: commandLine, desktop: this.name })
     this.pid = r.pid ?? this.pid
+    this.state = 'running'
+    return r
+  }
+
+  /**
+   * 枚举开始菜单应用（宿主白名单）。启动只认这份清单里的精确名称，
+   * 不允许随手塞 exe/URI —— 那是"看着要开 A、实际开了 B"的来源。
+   */
+  async listApps() {
+    this.assertActive('listApps')
+    const r = await this.transport.request({ op: 'apps', desktop: this.name })
+    return Array.isArray(r?.apps) ? r.apps : []
+  }
+
+  /** 按开始菜单里的精确名称启动；找不到抛 APP_NOT_FOUND（宿主带回候选名）。 */
+  async launchApp(name) {
+    this.assertActive('launchApp')
+    if (typeof name !== 'string' || !name.trim()) throw new DesktopError('launchApp 需要应用名', 'EARGS')
+    const r = await this.transport.request({ op: 'launch-app', name: name.trim(), desktop: this.name })
+    if (r && r.ok === false) {
+      const err = new DesktopError(r.error ?? '启动失败', r.code ?? 'EAPP')
+      if (Array.isArray(r.candidates) && r.candidates.length) err.candidates = r.candidates
+      throw err
+    }
+    this.pid = r?.pid ?? this.pid
     this.state = 'running'
     return r
   }

@@ -415,6 +415,26 @@ if (exists(ps1Path)) {
   osSrc.includes("=== 'virtual'")
     ? ok('os 组件允许把 desktop.mode 配成 virtual')
     : bad('os 组件不认 virtual 模式（配了也只会退回 user）')
+  // 应用白名单：只能从开始菜单清单按精确名称启动（豆包那套 ⑤）。
+  for (const needle of ['Get-StartApps', "'launch-app'", 'APP_NOT_FOUND', 'APP_NOT_LAUNCHABLE', 'APP_TARGET_MISSING', 'Start Menu']) {
+    ps1.includes(needle) ? ok('宿主应用白名单用到 ' + needle) : bad('宿主缺少 ' + needle + '（启动程序没有白名单约束）')
+  }
+  const deskSrc = exists('src/desktop.mjs') ? readFileSync(path.join(ROOT, 'src/desktop.mjs'), 'utf8') : ''
+  deskSrc.includes('async listApps(') && deskSrc.includes('async launchApp(')
+    ? ok('DesktopSession 暴露 listApps/launchApp（精确名称启动）')
+    : bad('DesktopSession 缺少 listApps/launchApp')
+  osSrc.includes("'launch-app'") && osSrc.includes("'apps'")
+    ? ok('deputy_desktop 暴露 apps / launch-app')
+    : bad('deputy_desktop 未暴露 apps / launch-app')
+  // 布局变化的动作之后必须要求重新截图（豆包那套 ②）。
+  const runnerSrc = exists('src/runner.mjs') ? readFileSync(path.join(ROOT, 'src/runner.mjs'), 'utf8') : ''
+  runnerSrc.includes('rescan')
+    ? ok('runner 在 frameChanged 时回 rescan（旧截图坐标作废）')
+    : bad('runner 未标 rescan，模型会照旧截图连点')
+  const viewerB = exists('src/viewer.mjs') ? readFileSync(path.join(ROOT, 'src/viewer.mjs'), 'utf8') : ''
+  viewerB.includes('/api/launch-app') && viewerB.includes('/api/apps')
+    ? ok('面板端点暴露 /api/apps 与 /api/launch-app')
+    : bad('面板没有应用清单端点')
   // 8h. 彩色快照（面板要的是用户看到的画面，灰度帧只能给感知链路）
   for (const needle of ["'snapshot'", 'EncodePng', 'ToPngBase64', 'SnapshotScreen', 'SnapshotWindow', '$maxW']) {
     ps1.includes(needle) ? ok('宿主彩色快照用到 ' + needle) : bad('宿主缺少 ' + needle + '（面板只能拿到灰度帧）')

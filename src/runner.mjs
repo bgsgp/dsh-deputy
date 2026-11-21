@@ -142,13 +142,14 @@ export function createDeputy({ sensor, actuator, onEvidence, budget = new Budget
       if (before.width !== after.width || before.height !== after.height || before.gray.length !== after.gray.length) {
         // 窗口切换/缩放后两块像素缓冲不能逐点比较。尺寸变化本身就是明确的画面效果，
         // 标出来交给上层判断，而不是用新宽度去索引旧缓冲区。
-        return { ok: true, verdict: 'ok', frameChanged: true, inside: 1, outside: 0, retries, roi }
+        return { ok: true, verdict: 'ok', frameChanged: true, rescan: true, inside: 1, outside: 0, retries, roi }
       }
       result = verifyAction(before.gray, after.gray, after.width, after.height, roi, {
         expect: a.verify?.expect ?? cfg.roi.expect ?? 0.02,
         outsideRatioLimit: cfg.roi.outsideRatioLimit,
       })
-      if (result.verdict === 'ok') return { ok: true, ...result, retries }
+      // 布局变了（frameChanged）就必须重新截图再算坐标：旧帧里的坐标在新界面上根本不存在。
+      if (result.verdict === 'ok') return { ok: true, ...result, retries, rescan: result.frameChanged === true }
       if (result.verdict === 'no-effect' && budget.allowRetry(a.id ?? 'anon')) {
         retries++
         continue // 同一动作重试，注意只会重试有限次

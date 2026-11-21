@@ -735,6 +735,45 @@ function CloseVirtualDesktop {
     return (-not [Deputy.Desk2]::OnTempDesktop($script:vdTemp))
 }
 
+function Get-StartApps {
+    # 枚举开始菜单里的启动项（用户级 + 全局），也就是"系统告诉我有这些应用"。
+    # 启动只认精确名称：不允许随手塞 exe/URI，避免"看着要开 A、实际开了 B"。
+    $roots = @(
+        (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),
+        (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs')
+    )
+    $seen = @{}
+    $list = New-Object System.Collections.ArrayList
+    foreach ($root in $roots) {
+        if (-not (Test-Path $root)) { continue }
+        $src = 'user'
+        if ($root -like '*ProgramData*') { $src = 'machine' }
+        Get-ChildItem -Path $root -Recurse -Include '*.lnk', '*.url' -ErrorAction SilentlyContinue | ForEach-Object {
+            $key = $_.BaseName.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { return }
+            $seen[$key] = $true
+            [void]$list.Add([pscustomobject]@{ name = $_.BaseName; path = $_.FullName; source = $src })
+        }
+    }
+    # 打包应用（UWP/Store，例如 Win11 记事本、计算器）没有 .lnk，只在 shell:AppsFolder 里。
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $folder = $shell.Namespace('shell:AppsFolder')
+        if ($folder) {
+            foreach ($item in @($folder.Items())) {
+                $appName = [string]$item.Name
+                $appId = [string]$item.Path
+                if (-not $appName -or -not $appId) { continue }
+                $key = $appName.ToLowerInvariant()
+                if ($seen.ContainsKey($key)) { continue }
+                $seen[$key] = $true
+                [void]$list.Add([pscustomobject]@{ name = $appName; path = $appId; source = 'apps' })
+            }
+        }
+    } catch { }
+    return @($list | Sort-Object name)
+}
+
 try {
     if ($isUser) {
         # 用户桌面模式：不建新桌面，直接操作当前输入桌面（豆包 / UI-TARS 那种做法）。
@@ -852,6 +891,64 @@ try {
                     $w = [Deputy.Desk2]::CapWidth
                     $h = [Deputy.Desk2]::CapHeight
                     Reply @{ id = $req.id; ok = $true; width = $w; height = $h; frameWidth = $sw; frameHeight = $sh; originX = 0; originY = 0; source = 'screen'; pngBase64 = $png }
+                }
+                'apps' {
+                    $all = @(Get-StartApps)
+                    Reply @{ id = $req.id; ok = $true; count = $all.Count; apps = $all }
+                }
+                'launch-app' {
+                    $want = [string]$req.name
+                    if (-not $want) { throw 'launch-app 需要 name（开始菜单里的精确名称）' }
+                    $all = @(Get-StartApps)
+                    $hit = $all | Where-Object { $_.name -eq $want } | Select-Object -First 1
+                    if (-not $hit) {
+                        $near = @($all | Where-Object { $_.name -like "*$want*" } | Select-Object -First 8 -ExpandProperty name)
+                        Reply @{ id = $req.id; ok = $false; code = 'APP_NOT_FOUND'; error = "开始菜单里没有精确名为 $want 的应用（只能按精确名称启动）"; candidates = $near }
+                        continue
+                    }
+                    if ($hit.source -eq 'apps') {
+                        # 打包应用只能通过 shell:AppsFolder\<AppID> 起（不是普通 exe）。
+                        $explorer = Join-Path $env:WINDIR 'explorer.exe'
+                        $sheet = 'shell:AppsFolder\' + $hit.path
+                        if ($isUser -or $isVirtual) {
+                            $pidOn = [Deputy.Desk2]::LaunchUser($explorer, $sheet)
+                        } else {
+                            $pidOn = [Deputy.Desk2]::Launch($explorer, $sheet, $Name)
+                        }
+                        if ($isVirtual) { $vdLaunched += $pidOn }
+                        elseif (-not $isUser) { $launched += $pidOn }
+                        Reply @{ id = $req.id; ok = $true; name = $hit.name; target = $sheet; pid = $pidOn; mode = $Mode; packaged = $true }
+                        continue
+                    }
+                    if ($hit.path -like '*.url') {
+                        Reply @{ id = $req.id; ok = $false; code = 'APP_NOT_LAUNCHABLE'; error = "$($hit.name) 是网址快捷方式，不能当程序启动" }
+                        continue
+                    }
+                    $target = $hit.path
+                    $appArgs = ''
+                    try {
+                        $ws = New-Object -ComObject WScript.Shell
+                        $sc = $ws.CreateShortcut($hit.path)
+                        if ($sc.TargetPath) { $target = $sc.TargetPath }
+                        if ($sc.Arguments) { $appArgs = [string]$sc.Arguments }
+                    } catch { }
+                    if (-not (Test-Path $target)) {
+                        Reply @{ id = $req.id; ok = $false; code = 'APP_TARGET_MISSING'; error = "$($hit.name) 指向的 $target 不存在" }
+                        continue
+                    }
+                    $focused = $false
+                    if ($isUser -or $isVirtual) {
+                        $pidOn = [Deputy.Desk2]::LaunchUser($target, $appArgs)
+                        $focused = [Deputy.Desk2]::RaiseProcessWindow($pidOn, 2500)
+                    } else {
+                        $pidOn = [Deputy.Desk2]::Launch($target, $appArgs, $Name)
+                    }
+                    # 启动"已受理但还没窗口"是正常现象：只回执，不许让调用方马上再点一次（会开出两个实例）。
+                    if ($isVirtual) { $vdLaunched += $pidOn }
+                    elseif (-not $isUser) { $launched += $pidOn }
+                    $resp = @{ id = $req.id; ok = $true; name = $hit.name; target = $target; pid = $pidOn; mode = $Mode }
+                    if ($isUser -or $isVirtual) { $resp.focused = $focused }
+                    Reply $resp
                 }
                 'vdesk-status' {
                     Reply @{ id = $req.id; ok = $true; mode = $Mode; active = [Deputy.Desk2]::OnTempDesktop($script:vdTemp); current = [Deputy.Desk2]::CurrentDesktopGuid().ToString(); orig = $script:vdOrig.ToString(); temp = $script:vdTemp.ToString(); count = [Deputy.Desk2]::DesktopCount() }

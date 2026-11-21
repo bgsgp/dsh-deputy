@@ -205,8 +205,9 @@ export function toolSpecs(deputy, session, options = {}) {
       inputSchema: {
         type: 'object',
         properties: {
-          op: { type: 'string', enum: ['status', 'open', 'launch', 'tree', 'close'] },
+          op: { type: 'string', enum: ['status', 'open', 'apps', 'launch-app', 'launch', 'tree', 'close'] },
           exe: { type: 'string', description: 'launch 时要启动的可执行文件' },
+          name: { type: 'string', description: 'launch-app 时的应用名，必须是开始菜单清单里的精确名称' },
           args: { type: 'array', items: { type: 'string' } },
           depth: { type: 'number', description: 'tree 的递归深度' },
         },
@@ -241,6 +242,20 @@ export function toolSpecs(deputy, session, options = {}) {
           case 'open':
             await session.ensureOpen()
             return { state: session.state, name: session.name }
+          case 'apps': {
+            await session.ensureOpen()
+            const apps = await session.listApps()
+            return { state: session.state, apps, count: apps.length }
+          }
+          case 'launch-app': {
+            if (!args.name) throw new Error('launch-app 需要 name（开始菜单里的精确名称）')
+            await session.ensureOpen()
+            const r = await session.launchApp(args.name)
+            const value = { state: session.state, name: r?.name ?? args.name }
+            if (r?.target) value.target = r.target
+            if (typeof r?.pid === 'number') value.pid = r.pid
+            return value
+          }
           case 'launch': {
             if (!args.exe) throw new Error('launch 需要 exe')
             await session.ensureOpen()

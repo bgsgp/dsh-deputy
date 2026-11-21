@@ -77,6 +77,23 @@ DPI 一条必须记住：`user` 模式启动后立刻调 `[Deputy.Desk2]::MakeDp
 切换方式：`cordis.patch.yml` 里 `dsh-deputy-os` 的 `config.desktop.mode: user`（或安装后在插件配置里改），
 改成 `isolated` 即回到"完全不碰你桌面"的老行为。
 
+## 1.2 应用白名单：只按开始菜单里的精确名称启动
+
+宿主有两个相关 op：
+
+- `apps`：枚举 `%APPDATA%\Microsoft\Windows\Start Menu\Programs` 与
+  `%ProgramData%\…\Start Menu\Programs` 下的 `*.lnk`/`*.url`，再补 `shell:AppsFolder` 里的打包应用
+  （Win11 记事本、计算器这类没有快捷方式），按显示名去重，回 `{ name, path, source: user|machine|apps }`。
+- `launch-app { name }`：**只认精确名称**。找不到回 `APP_NOT_FOUND` + `candidates`；`.url` 回
+  `APP_NOT_LAUNCHABLE`；目标不存在回 `APP_TARGET_MISSING`。`.lnk` 用 `WScript.Shell` 的
+  `CreateShortcut` 解析出 `TargetPath`/`Arguments` 再用 `CreateProcessW`，打包应用走
+  `explorer.exe shell:AppsFolder\<AppID>`。
+
+为什么不让调用方随便传 exe/URI：那样"看着要开 A、实际开了 B"没法校验。启动回执只代表**已受理**，
+窗口要另外截图确认；**已受理但还没窗口时不许再点一次**，否则会把两个实例叠在一起。
+
+宿主回 `mode=virtual` 时，这次启动的 pid 记在 `$vdLaunched`，关会话时只杀这一批。
+
 ## 2. 三个硬性约束（写代码前必须先接受）
 
 | 约束 | 后果 | 本项目的做法 |

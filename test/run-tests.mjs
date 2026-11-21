@@ -806,6 +806,38 @@ await test('virtual 模式：不要求 attached，宿主拒绝输入时抛 VDESK
   await session.close()
 })
 
+await test('应用白名单：只按开始菜单精确名称启动，找不到抛 APP_NOT_FOUND', async () => {
+  const session = new DesktopSession({ transport: createFakeTransport(), name: 'deputy-apps-test' })
+  await session.open()
+  const apps = await session.listApps()
+  assert.equal(apps.length, 1)
+  assert.equal(apps[0].name, 'Notepad')
+  const launched = await session.launchApp('Notepad')
+  assert.equal(typeof launched.pid, 'number')
+  assert.equal(session.state, 'running')
+  await assert.rejects(
+    () => session.launchApp('Chrome'),
+    (err) => err.code === 'APP_NOT_FOUND'
+  )
+  await session.close()
+})
+
+await test('闭环：动作后画面尺寸变化 → rescan=true（旧截图坐标作废）', async () => {
+  const frames = [
+    { gray: blank(), width: W, height: H },
+    { gray: new Uint8Array((W + 10) * (H + 10)).fill(200), width: W + 10, height: H + 10 },
+  ]
+  const deputy = createDeputy({
+    sensor: { capture: async () => frames.shift() },
+    actuator: { perform: async () => {} },
+    budget: new Budget(),
+    policy: { settleMs: 0 },
+  })
+  const step = await deputy.step({ kind: 'input', payload: { op: 'click', x: 1, y: 1 }, verify: { expect: 0 }, id: 'rescan' })
+  assert.equal(step.ok, true)
+  assert.equal(step.rescan, true, '布局变化后必须要求重新截图，否则会按旧坐标点空')
+})
+
 await test('HTTP 面板：健康检查、合并采帧、坐标换算与输入校验', async () => {
   const transport = createFakeTransport()
   const request = transport.request

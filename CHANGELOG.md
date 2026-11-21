@@ -2,6 +2,25 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.45
+
+### 对齐豆包那套闭环：应用白名单精确启动 + 布局变化后强制重截
+- **应用白名单**（`Get-StartApps` + `apps`/`launch-app` op）：枚举用户与全局开始菜单里的 `.lnk`/`.url`，
+  再补 `shell:AppsFolder` 的打包应用（Win11 记事本之类没有快捷方式），按显示名去重；真机 207 项。
+  `launch-app` 只认**精确名称**，找不到回 `APP_NOT_FOUND` + 候选名；`.url` 回 `APP_NOT_LAUNCHABLE`；
+  目标缺失回 `APP_TARGET_MISSING`。`.lnk` 用 `WScript.Shell.CreateShortcut` 解出 `TargetPath/Arguments`
+  再 `CreateProcessW`，打包应用走 `explorer.exe shell:AppsFolder\<AppID>`。
+- **不许随手跑 exe/URI**：`deputy_desktop` 新增 `apps` / `launch-app`，面板新增 `GET /api/apps`、
+  `POST /api/launch-app`；`DesktopSession.listApps()` / `launchApp(name)`。启动回执只代表已受理，
+  "已受理但还没窗口"时不重试（避免开出两个实例）。
+- **rescan**（豆包第②条）：`runner.step` 在画面尺寸/布局变化时回 `rescan: true`（含尺寸变化分支），
+  调用方必须重新截图再算坐标 —— 旧截图里的坐标在新界面上根本不存在。
+- **真机验证**：虚拟桌面里 `op:"apps"` 拿到 207 项 → `launch-app "Google Chrome"` 拉起 Chrome 新标签页
+  （截图 `deputy-app-launch.png`）→ `launch-app "记事本"` 走打包应用通道回 `packaged:true`；
+  `close()` 后桌面数回到 1。
+- **自检**：`node test/run-tests.mjs` = **55 项全部通过**（新增「应用白名单：只按精确名称启动，找不到抛
+  `APP_NOT_FOUND`」与「动作后画面尺寸变化 → rescan=true」）；`check-plugin` 增补应用白名单与 rescan 断言。
+
 ## 1.3.44
 
 ### 新增 `virtual` 桌面模式：任务视图里开一块临时桌面（豆包式观感）
