@@ -17,6 +17,7 @@ import { browserToolSpecs } from '../src/browser/tools.mjs'
 import { runSteps } from '../src/browser/act.mjs'
 import { BrowserDaemon } from '../src/browser/daemon.mjs'
 import { waitForLoad } from '../src/browser/wait.mjs'
+import { verifyFile, mergeVerdict, FILE_VERDICT } from '../src/verify-file.mjs'
 
 const PASS = []
 const FAILED = []
@@ -1037,6 +1038,79 @@ await test('包根锚点：index.mjs 是 name=dsh-deputy 的空组件，老路�
   assert.match(patch, /id: dsh-deputy-browser/, 'patch 必须有 browser 组件 row')
 })
 
+await test('落盘回读：存在且够大的文件才算写出来了', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'deputy-verify-'))
+  const file = join(dir, 'report.txt')
+  writeFileSync(file, 'hello deputy')
+  const ok = verifyFile({ path: file })
+  assert.equal(ok.verified, true)
+  assert.equal(ok.reason, FILE_VERDICT.OK)
+  assert.equal(ok.bytes, 12)
+  assert.equal(verifyFile({ path: file, minBytes: 12 }).verified, true)
+  const small = verifyFile({ path: file, minBytes: 4096 })
+  assert.equal(small.verified, false)
+  assert.equal(small.reason, FILE_VERDICT.TOO_SMALL)
+  assert.equal(small.bytes, 12)
+  assert.equal(small.minBytes, 4096)
+})
+
+await test('落盘回读：路径不在 / 不是文件 / 空路径都给明确结论码', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'deputy-verify-'))
+  const missing = verifyFile({ path: join(dir, 'nope.txt') })
+  assert.equal(missing.verified, false)
+  assert.equal(missing.reason, FILE_VERDICT.MISSING)
+  assert.equal(missing.path, join(dir, 'nope.txt'))
+  assert.equal(verifyFile({ path: dir }).reason, FILE_VERDICT.NOT_FILE)
+  assert.equal(verifyFile({ path: '   ' }).reason, FILE_VERDICT.NO_PATH)
+  assert.equal(verifyFile({}).reason, FILE_VERDICT.NO_PATH)
+})
+
+await test('落盘回读：文件是保存类动作的最终裁判（双向覆盖像素结论）', () => {
+  const okFile = { verified: true, reason: FILE_VERDICT.OK, path: 'x', bytes: 10 }
+  // 对话框挡住 ROI：像素说「没变化」，文件却已经写好 → 必须判成功
+  const savedAnyway = mergeVerdict({ ok: false, verdict: 'no-effect', inside: 0, outside: 0 }, okFile)
+  assert.equal(savedAnyway.ok, true)
+  assert.equal(savedAnyway.verdict, 'file-ok')
+  assert.equal(savedAnyway.inside, 0)
+  // 像素说「变了」，但文件根本不在 → 变的是对话框，不是磁盘
+  const missingFile = { verified: false, reason: FILE_VERDICT.MISSING, path: 'x' }
+  const lied = mergeVerdict({ ok: true, verdict: 'ok', inside: 0.3, outside: 0 }, missingFile)
+  assert.equal(lied.ok, false)
+  assert.equal(lied.verdict, 'file-missing')
+  assert.equal(lied.inside, 0.3)
+  // 动作本身已经硬失败时，别用文件结论盖掉真正的故障
+  const halted = mergeVerdict({ ok: false, verdict: 'error', error: '预算用尽' }, okFile)
+  assert.equal(halted.ok, false)
+  assert.equal(halted.verdict, 'error')
+  assert.equal(halted.file.verified, true)
+})
+
+await test('deputy_act 参数表暴露 verifyFile（path 必填，minBytes 可选）', () => {
+  const act = toolSpecs({ observe: async () => ({}) }, {})[1]
+  const spec = act.inputSchema.properties.verifyFile
+  assert.ok(spec, 'deputy_act 必须声明 verifyFile')
+  assert.equal(spec.type, 'object')
+  assert.deepEqual(spec.required, ['path'])
+  assert.equal(spec.properties.path.type, 'string')
+  assert.equal(spec.properties.minBytes.type, 'number')
+  assert.equal(spec.additionalProperties, false)
+  assert.ok(act.outputSchema.properties.file, 'deputy_act 输出必须声明 file')
+})
+
+await test('deputy_act 传 verifyFile 时用磁盘回读改写 verdict', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'deputy-verify-'))
+  const file = join(dir, 'out.txt')
+  writeFileSync(file, 'x'.repeat(32))
+  const fake = { step: async () => ({ ok: false, verdict: 'no-effect', inside: 0, outside: 0, retries: 0 }) }
+  const act = toolSpecs(fake, {})[1]
+  const res = await act.handler({ kind: 'input', payload: { op: 'key', combo: 'Ctrl+S' }, verifyFile: { path: file, minBytes: 16 } })
+  assert.equal(res.ok, true)
+  assert.equal(res.verdict, 'file-ok')
+  assert.equal(res.file.bytes, 32)
+  const miss = await act.handler({ kind: 'input', payload: { op: 'key', combo: 'Ctrl+S' }, verifyFile: { path: join(dir, 'gone.txt') } })
+  assert.equal(miss.ok, false)
+  assert.equal(miss.verdict, 'file-missing')
+})
 console.log(
   FAILED.length
     ? `\n${PASS.length} 项通过，${FAILED.length} 项失败\n${PASS.map((p) => '  ✓ ' + p).join('\n')}`

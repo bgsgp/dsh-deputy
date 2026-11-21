@@ -6,6 +6,7 @@ import { createDeputy } from '../runner.mjs'
 import { UiaBridge, createUiaActuator, createWindowsSensor } from '../uia-bridge.mjs'
 import { Budget } from '../budget.mjs'
 import * as A from '../action.mjs'
+import { verifyFile, mergeVerdict } from '../verify-file.mjs'
 
 const SERVER_INFO = { name: 'dsh-deputy', version: '1.2.0' }
 
@@ -52,7 +53,13 @@ const TOOLS = [
     description: 'Perform one action and verify its region of influence.',
     inputSchema: {
       type: 'object',
-      properties: { kind: { enum: ['uia', 'input', 'shell', 'wait'] }, payload: { type: 'object' }, expect: { type: 'number' } },
+      properties: {
+        kind: { enum: ['uia', 'input', 'shell', 'wait'] },
+        payload: { type: 'object' },
+        expect: { type: 'number' },
+        // 保存类动作必须磁盘回读，语义与 DSH 侧 deputy_act 一致
+        verifyFile: { type: 'object', properties: { path: { type: 'string' }, minBytes: { type: 'number' } }, required: ['path'] },
+      },
       required: ['kind', 'payload'],
     },
   },
@@ -67,8 +74,11 @@ async function call(name, args = {}) {
   switch (name) {
     case 'deputy_sense':
       return deputy.observe()
-    case 'deputy_act':
-      return deputy.step(A.action(args.kind, args.payload, { expect: args.expect }))
+    case 'deputy_act': {
+      const result = await deputy.step(A.action(args.kind, args.payload, { expect: args.expect }))
+      if (!args.verifyFile) return result
+      return mergeVerdict(result, verifyFile(args.verifyFile))
+    }
     case 'deputy_sheet': {
       const ev = await deputy.flush(args.reason ?? 'manual')
       if (!ev) return { content: [{ type: 'text', text: '{"frames":0}' }] }

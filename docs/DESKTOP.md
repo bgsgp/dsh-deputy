@@ -166,6 +166,32 @@ const deputy = createDeputy({
 
 感知、打分、拼图、ROI 校验全部不变——它们本来就不认识"桌面"是什么，这正是分层的价值。
 
+## 6.1 落盘回读：保存类动作的最终裁判
+
+ROI 三分只能说明「这块像素变了」，它证明不了文件写没写出来：
+
+- 保存对话框一关，ROI 里确实有变化 —— 但变化的是对话框，不是磁盘；
+- 反过来对话框挡住 ROI（或保存压根没有可见反馈）时画面几乎不动，文件其实已经写好了。
+
+所以保存类动作必须回读磁盘，`deputy_act` 直接带这个能力：
+
+```js
+deputy_act({
+  kind: 'input',
+  payload: { op: 'key', combo: 'Ctrl+S' },
+  verifyFile: { path: 'D:/out/report.xlsx', minBytes: 1024 },
+})
+```
+
+`src/verify-file.mjs` 只有两个纯函数，fs 可注入（单测不依赖 Windows）：
+
+| 函数 | 职责 |
+|---|---|
+| `verifyFile({ path, minBytes })` | 回读文件 → `{ verified, reason, path, bytes, minBytes }`；结论码 `file-ok` / `file-missing` / `file-too-small` / `file-not-a-file` / `file-no-path` |
+| `mergeVerdict(pixel, file)` | 合成最终结论：硬失败（`halt`/`error`）保留原判不翻案；像素 `no-effect` 但文件已落盘 → 成功；像素成功但文件不在 → 失败 |
+
+回包里的 `file` 字段是给模型看的证据，`render()` 会把它压成「文件已落盘 · 12345B」。
+
 ## 7. 宿主实现的五个坑（真机踩出来的）
 
 1. **`SetThreadDesktop` 要在无窗口线程里调**。PowerShell 主线程已经有控制台窗口，

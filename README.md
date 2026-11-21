@@ -91,7 +91,7 @@ dsh plugin --profile web add dsh-deputy
 | ③ 会话隔离用另一块桌面 | ✅ `mode: user`（默认，你现在的真实桌面）/`virtual`（任务视图新桌面）/`isolated`（独立 Win32 桌面），运行时可用 `open` 的 `mode` 切换 |
 | ④ 登录、验证码、扫码、MFA 一律交人 | 🟡 只做到"失败不硬撑"：动作校验不过就停、回 `verdict`；**没有**自动识别登录页并交还控制权（见 [docs/ROADMAP.md](docs/ROADMAP.md)） |
 | ⑤ 应用必须按开始菜单清单的精确名称启动 | ✅ `deputy_desktop { op: "apps" }` 枚举开始菜单（`.lnk`/`.url` + `shell:AppsFolder` 打包应用，真机 207 项），`op: "launch-app", name: "Google Chrome"` 只认精确名称；找不到回 `APP_NOT_FOUND` + 候选名 |
-| ⑥ 落盘类操作用文件系统回读校验 | 🟡 插件自身不做，但会话侧的 `read`/`glob` 就是回读通道（截图说保存成功 ≠ 文件在） |
+| ⑥ 落盘类操作用文件系统回读校验 | ✅ `deputy_act` 的 `verifyFile: { path, minBytes }` 动作后立刻回读磁盘；文件是最终裁判（见 [docs/DESKTOP.md](docs/DESKTOP.md#61-落盘回读保存类动作的最终裁判)） |
 
 本插件不做豆包那套「模型看像素猜控件」：能走 UIA 语义（`InvokePattern`/`ValuePattern`）就走语义，
 键鼠是兜底；真正的取舍写在 [docs/DESIGN.md](docs/DESIGN.md)。
@@ -165,9 +165,13 @@ DEPUTY_FAKE=1 node src/mcp/server.mjs   # 非 Windows 也能跑通 MCP 协议
 | 工具 | 作用 | 返回 |
 |---|---|---|
 | `deputy_sense` | 采一帧并打分 | `{score, tier, box, hashDistance}` |
-| `deputy_act` | 在隔离桌面执行动作 + 校验 | `{ok, verdict, inside, outside, retries}` |
+| `deputy_act` | 执行动作 + ROI 校验；保存类动作传 `verifyFile` 做磁盘回读 | `{ok, verdict, inside, outside, retries, file?}` |
 | `deputy_sheet` | 把缓冲帧压成 4×4 送出 | `{frames, budget, image}` + image content block |
 | `deputy_desktop` | 桌面会话：`status/open/apps/launch-app/launch/tree/close` | 会话状态 / pid / 开始菜单应用清单 / 窗口树 |
+
+保存类动作必须回读磁盘，别只信像素：`deputy_act({ kind: 'input', payload: { op: 'key', combo: 'Ctrl+S' },
+verifyFile: { path: 'D:/out/report.xlsx', minBytes: 1024 } })`。文件存在且够大才算保存成功 —— 见
+[docs/DESKTOP.md](docs/DESKTOP.md#61-落盘回读保存类动作的最终裁判)。
 
 **浏览器（browser）五个工具**（完整 CDP 实现，细节见 [docs/BROWSER.md](docs/BROWSER.md)；1.3.39 待真机回归）
 

@@ -24,6 +24,7 @@ import { createViewer, DEFAULT_VIEW_PORT } from './viewer.mjs'
 import { setOsStatus } from './status.mjs'
 import { toParameters, text, registerTools } from './registry.mjs'
 import * as A from './action.mjs'
+import { verifyFile, mergeVerdict } from './verify-file.mjs'
 
 // 兼容旧的 import 路径（测试与 MCP 形态仍从 ./src/index.mjs 取这两个）
 export { toParameters, registerTools } from './registry.mjs'
@@ -126,7 +127,8 @@ export function toolSpecs(deputy, session, options = {}) {
     },
     {
       name: 'deputy_act',
-      description: '在隔离桌面里执行一个动作（uia/input/shell/wait），自动校验它是否真的生效（ROI 三分）。',
+      description:
+        '在隔离桌面里执行一个动作（uia/input/shell/wait），自动校验它是否真的生效（ROI 三分）；保存类动作传 verifyFile 做磁盘回读。',
       inputSchema: {
         type: 'object',
         properties: {
@@ -135,6 +137,16 @@ export function toolSpecs(deputy, session, options = {}) {
           // "parameters.payload.additionalProperties must be explicitly true or false"）
           payload: { type: 'object', additionalProperties: true },
           expect: { type: 'number', description: 'ROI 内期望的最小变化量' },
+          // 保存类动作必须回读磁盘：像素证明不了文件真的写出来了（见 src/verify-file.mjs）
+          verifyFile: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              path: { type: 'string', description: '保存后应当存在的文件路径' },
+              minBytes: { type: 'number', description: '文件至少应有的字节数（默认 0）' },
+            },
+            required: ['path'],
+          },
         },
         required: ['kind', 'payload'],
       },
@@ -148,10 +160,31 @@ export function toolSpecs(deputy, session, options = {}) {
           ok: { type: 'boolean' },
           verdict: { type: 'string' },
           retries: { type: 'number' },
+          file: {
+            type: 'object',
+            additionalProperties: true,
+            properties: {
+              path: { type: 'string' },
+              bytes: { type: 'number' },
+              verified: { type: 'boolean' },
+              reason: { type: 'string' },
+              minBytes: { type: 'number' },
+            },
+          },
         },
       },
-      render: (_args, v) => text(`动作${v?.ok ? '生效' : '未生效'}（${v?.verdict ?? 'n/a'}，重试 ${v?.retries ?? 0}）`),
-      handler: async (args) => deputy.step(A.action(args.kind, args.payload, { expect: args.expect })),
+      render: (_args, v) => {
+        const file = v?.file
+          ? ` · 文件${file.verified ? '已落盘' : '未落盘'}${typeof file.bytes === 'number' ? ` ${file.bytes}B` : ''}`
+          : ''
+        return text(`动作${v?.ok ? '生效' : '未生效'}（${v?.verdict ?? 'n/a'}，重试 ${v?.retries ?? 0}）${file}`)
+      },
+      handler: async (args) => {
+        const result = await deputy.step(A.action(args.kind, args.payload, { expect: args.expect }))
+        // 没有 verifyFile 就还是纯像素闭环；给了就由文件系统做最终裁判。
+        if (!args.verifyFile) return result
+        return mergeVerdict(result, verifyFile(args.verifyFile))
+      },
     },
     {
       name: 'deputy_sheet',

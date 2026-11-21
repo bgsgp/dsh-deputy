@@ -1,6 +1,6 @@
 {
   "name": "dsh-deputy",
-  "version": "1.3.47",
+  "version": "1.3.48",
   "description": "DSH deputy: change-scored desktop sensing packed into 4x4 contact sheets, plus a real Windows desktop (your own, or an isolated one) you can actually operate in.",
   "type": "module",
   "main": "src/index.mjs",

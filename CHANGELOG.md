@@ -2,6 +2,16 @@
 
 版本号规则：`主版本.本版本.总提交数`（标准三段 semver，pnpm/npm 可直接安装）。当前版本见 `package.json`。
 
+## 1.3.48
+
+### 落盘回读：保存类动作由文件系统做最终裁判
+- `deputy_act` 新增参数 `verifyFile: { path, minBytes? }`：动作跑完立刻回读磁盘，文件存在（且不小于 `minBytes`）才算保存成功。
+- 起因：保存一次文档，ROI 里变化的多半只是保存对话框的消失或状态栏一闪；反过来对话框挡住 ROI 时画面没变化、文件其实已经写好。像素在这两个方向上都会误判，唯一可靠的证据是文件系统本身。
+- 判定顺序（`src/verify-file.mjs`）：动作本身硬失败（`halt`/`error`）时保留原判、不被文件结论翻案；像素 `no-effect` 但文件已落盘 → `ok: true, verdict: 'file-ok'`；像素说生效但文件不在 → `ok: false, verdict: 'file-missing'`（另有 `file-too-small` / `file-not-a-file` / `file-no-path`）。
+- 回包新增 `file: { path, bytes, verified, reason }`，`render` 里显示「文件已落盘/未落盘 · N B」。
+- MCP 形态（`src/mcp/server.mjs`）同步支持，语义一致。
+- 自检 56 → 61 项（新增 5 项：够大/缺失/非文件/空路径、双向覆盖与硬失败保护、参数表、handler 改写）。
+
 ## 1.3.47
 
 默认桌面模式从 `virtual` 改成 `user`：**直接操作你现在的这张桌面**。
